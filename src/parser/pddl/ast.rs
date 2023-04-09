@@ -49,22 +49,49 @@ pub struct Domain<'a> {
 
 #[derive(EnumSetType, Debug)]
 pub enum Requirements {
+    /// Basic STRIPS-style adds and deletes
     Strips,
+    /// Allow type names in declarations of variables
     Typing,
+    /// Allow `not` in goal descriptions
     NegativePreconditions,
+    
     ActionCosts,
+    /// Allow `or` in goal descriptions
     DisjunctivePreconditions,
+    /// Support `=` as built-in predicate
     Equality,
+    /// Allow `exists` in goal descriptions
     ExistentialPreconditions,
+    /// Allow `forall` in goal descriptions
     UniversalPreconditions,
+    /// Same as `:existential-preconditions` + 
+    /// `:universal-preconditions`
     QuantifiedPreconditions,
+    /// Allow when in action effects
     ConditionalEffects,
+    /// Allow function definitions and use of effects using assignment operators and arithmetic preconditions.
     Fluents,
+    /// Same as `:strips` + `:typing` + `:negative-preconditions` + 
+    /// `:disjunctive-preconditions` + `:equality` + 
+    /// `:quantified-preconditions` + `:conditional-effects`
     ADL,
+    /// Allows durative actions.
+    /// 
+    /// Note: that this does not imply `:fluents`
     DurativeActions,
+    /// Allows predicates whose truth value is defined by a formula
     DerivedPredicates,
+    /// Allows the initial state to specify literals
+    /// that will become true at a specified time point 
+    /// implies [DurativeActions]
     TimedInitialLiterals,
+    /// Allows use of preferences in action
+    /// preconditions and goals.
     Preferences,
+    /// Allows use of constraints fields in
+    /// domain and problem files. These may contain modal operators supporting trajectory
+    /// constraints.
     Constraints
 }
 

@@ -2,8 +2,11 @@
 name = "pddl_rs"
 version = "0.1.0"
 edition = "2021"
+description = "PDDL parser"
+license = "MIT"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "pddl_rs"
 
 [dependencies]
-bnf = "0.5.0"
+enumset = "1.0.12"

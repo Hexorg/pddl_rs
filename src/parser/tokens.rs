@@ -119,10 +119,15 @@ pub enum TokenKind<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Token<'a> {
     pub span: Span,
-    pub kind: TokenKind<'a>
+    pub filename: Option<&'a str>,
+    pub line: &'a str,
+    pub kind: TokenKind<'a>,
 }
 
 impl<'a> Token<'a> {
+    pub fn new(line: usize, col: usize, len:usize, filename:Option<&'a str>, fline:&'a str,  kind:TokenKind<'a>) -> Self {
+        Token{filename, kind, span:Span::new(line, col, len), line:fline}
+    }
     pub fn unwrap_identifier(self) -> &'a str {
         match self.kind {
             TokenKind::Identifier(s) => s,
@@ -135,9 +140,5 @@ impl<'a> Token<'a> {
             TokenKind::Literal(l) => l,
             _ => panic!("Expected literal.")
         }
-    }
-
-    pub fn to_error(self, message:&str) -> super::Error {
-        super::Error { pos: super::Position::Span(self.span), message:String::from(message) }
     }
 }
