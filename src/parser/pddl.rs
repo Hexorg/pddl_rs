@@ -8,16 +8,34 @@ use lexer::Lexer;
 
 
 
-use self::ast::TypedList;
+use self::ast::{TypedList, Requirements};
 
 use super::Error;
 use super::tokens::{Token, TokenKind, KeywordToken, BinOpToken};
 
-/// Parses PDDL 3.0 syntax
+/// Parses PDDL 3.1 syntax
 /// Based on https://github.com/jan-dolejsi/pddl-reference/blob/master/_citedpapers/pddl3bnf.pdf
+/// 
+/// Example:
+/// ```rust
+/// use pddl_rs::parser::pddl::{Parser, ast::Stmt};
+/// let filename = "domain.pddl";
+/// let code = std::fs::read_to_string(filename).unwrap();
+/// let mut parser = Parser::new(code.as_str(), Some(filename));
+/// for result in parser {
+///     match result {
+///         Some(Ok(Stmt::Domain(domain))) => println!("{:?}", domain),
+///         Some(Ok(Stmt::Problem(problem))) => println!("{:?}", problem),
+///         Some(Err(e)) => println!("{}", e),
+///         None => println!("Done."),
+///     }
+/// }
+/// ```
+
 pub struct Parser<'a> {
     lexer: std::iter::Peekable<lexer::Lexer<'a>>,
     filename: Option<&'a str>,
+    requirements: EnumSet<Requirements>,
 }
 
 impl<'a> Iterator for Parser<'a> {
@@ -163,6 +181,16 @@ impl<'a> Parser<'a> {
         Ok(ast::Action{name, parameters, precondition, effect})
     }
 
+    /// ```ebnf
+    /// <functions-def> ::= (:functions <function typed list (atomic function skeleton)>)
+    /// ```
+    fn functions(&mut self) -> Result<(), Error<'a>> {
+        Ok(())
+    }
+
+    /// ```ebnf
+    /// <predicates-def> ::= (:predicates <atomic formula skeleton>+)
+    /// ```
     fn predicates(&mut self) -> Result<Vec<ast::Predicate<'a>>, Error<'a>> {
         use TokenKind::{OpenParenthesis, Identifier, QuestionMark, CloseParenthesis};
         let mut predicates = Vec::new();
@@ -185,8 +213,17 @@ impl<'a> Parser<'a> {
         while self.lexer.next_if(|t| matches!(t, Ok(Token{kind:QuestionMark,..}))).is_some() {
             identifiers.push(expect!(self, {Some(Ok(Token{kind:Identifier(s),..})) => Ok(s)}, EXPECTED_IDENTIFIER)?);
         }
-        expect!(self, {Some(Ok(Token{kind:BinOp(Minus),..})) => Ok(())}, "Expected '-' at the end of typed list.")?;
-        let kind = expect!(self, {Some(Ok(Token{kind:Identifier(s),..})) => Ok(s)}, EXPECTED_IDENTIFIER)?;
+        let mut kind = None;
+        // TODO: Both problem and domain specification uses typed_list, 
+        // but it's possible to have domain with requirements and not problem. 
+        // figure out how to deal with missing requirements for problem
+        let has_minus = if let Some(Ok(Token{kind:BinOp(Minus),..})) = self.lexer.peek() { true } else { false};
+        if self.requirements.contains(Requirements::Typing) || has_minus {
+            expect!(self, {Some(Ok(Token{kind:BinOp(Minus),..})) => Ok(())}, ":typing is enabled - expected '-' at the end of typed list.")?;
+            kind = Some(expect!(self, {Some(Ok(Token{kind:Identifier(s),..})) => Ok(s)}, EXPECTED_IDENTIFIER)?);
+        } else {
+            
+        }
         Ok(TypedList{identifiers, kind})
     }
 
@@ -197,8 +234,12 @@ impl<'a> Parser<'a> {
         while let Some(Ok(Token{kind:Identifier(s),..})) = self.lexer.next_if(|t| matches!(t, Ok(Token{kind:Identifier(_),..}))) {
             identifiers.push(s);
         }
-        expect!(self, {Some(Ok(Token{kind:BinOp(Minus),..})) => Ok(())}, "Expected '-' at the end of typed list.")?;
-        let kind = expect!(self, {Some(Ok(Token{kind:Identifier(s),..})) => Ok(s)}, EXPECTED_IDENTIFIER)?;
+        let mut kind = None;
+        let has_minus = if let Some(Ok(Token{kind:BinOp(Minus),..})) = self.lexer.peek() { true } else { false};
+        if self.requirements.contains(Requirements::Typing) || has_minus {
+            expect!(self, {Some(Ok(Token{kind:BinOp(Minus),..})) => Ok(())}, ":typing is enabled - expected '-' at the end of typed list.")?;
+            kind = Some(expect!(self, {Some(Ok(Token{kind:Identifier(s),..})) => Ok(s)}, EXPECTED_IDENTIFIER)?);
+        }
         Ok(TypedList{identifiers, kind})
     }
 
@@ -248,6 +289,7 @@ impl<'a> Parser<'a> {
                 Some(Ok(Token{kind:Identifier("constraints"),..})) => Ok(r.insert(ast::Requirements::Constraints)),
             }, "Expected requirements.")?;
         }
+        self.requirements = r;
         Ok(r)
     }
 
@@ -303,7 +345,7 @@ impl<'a> Parser<'a> {
 
     pub fn new(code:&'a str, filename:Option<&'a str>) -> Self {
         let lexer = Lexer::<'a>::new(code, filename).peekable();
-        Self{lexer, filename}
+        Self{lexer, filename, requirements:EnumSet::empty()}
     }
 }
 
@@ -321,12 +363,12 @@ mod tests {
         assert_eq!(parser.next(), Some(Ok(Stmt::Domain(Domain{
             name:"test", 
             requirements:enum_set!(Requirements::Strips | Requirements::Typing), 
-            types:vec![TypedList{identifiers:vec!["hand"], kind:"object"},
-                       TypedList{identifiers:vec!["water"], kind:"beverage"}], 
-            predicates:vec![Predicate{name:"warm", variables:vec![TypedList{identifiers:vec!["o"], kind:"object"}]}], 
+            types:vec![TypedList{identifiers:vec!["hand"], kind:Some("object")},
+                       TypedList{identifiers:vec!["water"], kind:Some("beverage")}], 
+            predicates:vec![Predicate{name:"warm", variables:vec![TypedList{identifiers:vec!["o"], kind:Some("object")}]}], 
             actions:vec![Action{
                 name:"test", 
-                parameters:vec![TypedList{identifiers:vec!["h"], kind:"hand"}, TypedList{identifiers:vec!["b"], kind:"beverage"}],
+                parameters:vec![TypedList{identifiers:vec!["h"], kind:Some("hand")}, TypedList{identifiers:vec!["b"], kind:Some("beverage")}],
                 precondition:Some(Expr::Literal { name: "cold", variables: vec!["h"] }),
                 effect:Some(Expr::Literal { name: "warm", variables: vec!["b"] })
             }]
@@ -342,7 +384,7 @@ mod tests {
             name:"test",
             domain:"barman",
             requirements: EnumSet::empty(),
-            objects:vec![TypedList{identifiers:vec!["shaker1"], kind:"shaker"}],
+            objects:vec![TypedList{identifiers:vec!["shaker1"], kind:Some("shaker")}],
             init: Expr::And(vec![Expr::Literal { name: "ontable", variables: vec!["shaker1"] }]),
             goal: Expr::And(vec![Expr::Literal { name: "contains", variables: vec!["shot1", "cocktail1"] }])
         }))))

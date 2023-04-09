@@ -55,7 +55,31 @@ pub enum Requirements {
     Typing,
     /// Allow `not` in goal descriptions
     NegativePreconditions,
-    
+    /// If this requirement is included in a PDDL specification, 
+    /// the use of numeric fluents is enabled (similar to the 
+    /// `:numeric-fluents` requirement). However, numeric fluents 
+    /// may only be used in certain very limited ways:
+    /// 1. Numeric fluents may not be used in any conditions (preconditions, goal conditions,
+    /// conditions of conditional effects, etc.).
+    /// 2. A numeric fluent may only be used as the target of an effect if it is 0-ary and called `total-cost`. 
+    /// If such an effect is used, then the `total-cost` fluent must be explicitly initialized
+    /// to 0 in the initial state.
+    /// 3. The only allowable use of numeric fluents in effects is in effects of the form 
+    /// `(increase (total-cost) <numeric-term>)`, where the `<numeric-term>` is either 
+    /// a non-negative numeric constant or of the form `(<function-symbol> <term>*)`.
+    /// (The `<term>` here is interpreted as shown in the PDDL grammar, i.e. 
+    /// it is a variable symbol or an object constant. Note that this `<term>` cannot 
+    /// be a `<function-term>`, even if the object fluents requirement is used.)
+    /// 4. No numeric fluent may be initialized to a negative value.
+    /// 5. If the problem contains a `:metric` specification, the objective must 
+    /// be `(minimize (total-cost))`, or - only if the `:durative-actions` requirement 
+    /// is also set - to minimize a linear combination of `total-cost` and `total-time`, 
+    /// with non-negative coefficients.
+    /// 
+    /// Note that an action can have multiple effects that increase `(total-cost)`, which
+    /// is particularly useful in the context of conditional effects.
+    /// Also note that these restrictions imply that `(total-cost)` never 
+    /// decreases throughout plan execution, i.e., action costs are never negative.
     ActionCosts,
     /// Allow `or` in goal descriptions
     DisjunctivePreconditions,
@@ -119,5 +143,6 @@ pub struct Predicate<'a> {
 #[derive(PartialEq, Debug)]
 pub struct TypedList<'a> {
     pub identifiers: Vec<&'a str>,
-    pub kind: &'a str,
+    /// kind will be None if `:typing` is not required
+    pub kind:Option<&'a str>, 
 }

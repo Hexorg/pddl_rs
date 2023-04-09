@@ -27,7 +27,7 @@
              :effect (and (not (ontable ?c))
 	     	     	  (not (handempty ?h))
 			  (holding ?h ?c)
-			  ;(increase (total-cost) 1)
+                          ;(increase (total-cost) 1)
                           ))
 
   (:action leave
