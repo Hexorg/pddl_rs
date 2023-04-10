@@ -1,8 +1,8 @@
 use std::iter::Peekable;
 use std::str::{CharIndices, Lines};
 
-use super::super::tokens::{Token, Span, TokenKind, BinOpToken, KeywordToken, Literal};
-use super::super::Error;
+use super::tokens::{Token, Span, TokenKind, BinOpToken, KeywordToken, Literal};
+use super::Error;
 use TokenKind::*;
 use BinOpToken::*;
 use KeywordToken::*;
@@ -161,11 +161,18 @@ impl<'a> Lexer<'a> {
 
             "requirements" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Requirements))),
             "types" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Types))),
+            "constants" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Constants))),
+            "functions" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Functions))),
+            "constraints" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Constraints))),
             "predicates" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Predicates))),
+
             "action" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Action))),
-            
+            "durative-action" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(DurativeAction))),
+            "derived" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Derived))),
             "parameters" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Parameters))),
             "precondition" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Precondition))),
+            "condition" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Condition))),
+            "duration" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Duration))),
             "effect" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Effect))),
 
             "objects" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Objects))),
