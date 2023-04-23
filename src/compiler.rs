@@ -18,31 +18,36 @@ impl<'a> Compiler {
             variables:HashMap::new(),
             type_map: Vec::new(),
         };
-        // compiler.build_type_map(&domain);
+        compiler.build_type_map(&domain);
         Ok(compiler)
     }
 
-    // fn build_type_map(&mut self, domain:&Domain) {
-    //     if domain.requirements.contains(crate::parser::ast::Requirements::Typing) {
-    //         for type in &domain.types {
-    //             if let Some(kind) = kind {
-    //                 let kind_id = *self.type_parents.get(*kind).unwrap();
-    //                 for subtype in identifiers {
-    //                     let subtype_id = 
-    //                     if !self.type_parents.contains_key(*subtype) {
-    //                         let size = self.types.len() as u16;
-    //                         self.types.push((*subtype).to_owned());
-    //                         self.type_parents.insert((*subtype).to_owned(), kind_id);
-    //                         size
-    //                     } else {
-    //                         *self.type_parents.get(*subtype).unwrap()
-    //                     };
-    //                 }
-    //             }
+    fn build_type_map(&mut self, domain:&Domain) {
+        if domain.requirements.contains(crate::parser::ast::Requirements::Typing) {
+            for r#type in &domain.types {
+                match r#type {
+                    List::Typed(identifiers, kind) => {
+                        // TODO: Better search in type mapping
+                        //    Currently using O(n) where n is amount of types.
+                        let (kind_id, _) = self.types.iter().enumerate().find(|t| t.1 == kind).unwrap();
+                        for subtype in identifiers {
+                            if !self.type_parents.contains_key(*subtype) {
+                                let size = self.types.len() as u16;
+                                self.types.push((*subtype).to_owned());
+                                self.type_parents.insert((*subtype).to_owned(), kind_id as u16);
+                                size
+                            } else {
+                                panic!("Redeclared subtype")
+                            };
+                        }
+                    },
+                    _ => panic!("Unexpected AST in domain.types"),
+                    
+                }
                 
-    //         }
-    //     }
-    // }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
