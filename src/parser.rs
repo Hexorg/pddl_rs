@@ -97,10 +97,9 @@ impl<'a> std::fmt::Display for Error<'a> {
 /// let mut parser = Parser::new(code.as_str(), Some(filename));
 /// for result in parser {
 ///     match result {
-///         Some(Ok(Stmt::Domain(domain))) => println!("{:?}", domain),
-///         Some(Ok(Stmt::Problem(problem))) => println!("{:?}", problem),
-///         Some(Err(e)) => println!("{}", e),
-///         None => println!("Done."),
+///         Ok(Stmt::Domain(domain)) => println!("{:?}", domain),
+///         Ok(Stmt::Problem(problem)) => println!("{:?}", problem),
+///         Err(e) => println!("{}", e),
 ///     }
 /// }
 /// ```

@@ -218,7 +218,7 @@ mod tests {
     use super::{Lexer, Token, TokenKind::*, OpToken::*};
     #[test]
     fn test_include() {
-        let code = "((:operator (!drive ?x ?y ?z ?start ?time)\n))";
+        let code = "((:operator (!drive ?x ?y ?z ?p ?time)\n))";
         let mut lines = code.lines().peekable();
         let mut l = Lexer::new(code, None);
         assert_eq!(l.next(), Some(Ok(Token::new(1, 1, 1, None, lines.peek().unwrap(), OpenParenthesis))));
@@ -235,10 +235,10 @@ mod tests {
         assert_eq!(l.next(), Some(Ok(Token::new(1, 27, 1, None, lines.peek().unwrap(), QuestionMark))));
         assert_eq!(l.next(), Some(Ok(Token::new(1, 28, 1, None, lines.peek().unwrap(), Identifier("z")))));
         assert_eq!(l.next(), Some(Ok(Token::new(1, 30, 1, None, lines.peek().unwrap(), QuestionMark))));
-        assert_eq!(l.next(), Some(Ok(Token::new(1, 31, 5, None, lines.peek().unwrap(), Identifier("start")))));
-        assert_eq!(l.next(), Some(Ok(Token::new(1, 37, 1, None, lines.peek().unwrap(), QuestionMark))));
-        assert_eq!(l.next(), Some(Ok(Token::new(1, 38, 4, None, lines.peek().unwrap(), Identifier("time")))));
-        assert_eq!(l.next(), Some(Ok(Token::new(1, 42, 1, None, lines.peek().unwrap(), CloseParenthesis))));
+        assert_eq!(l.next(), Some(Ok(Token::new(1, 31, 1, None, lines.peek().unwrap(), Identifier("p")))));
+        assert_eq!(l.next(), Some(Ok(Token::new(1, 33, 1, None, lines.peek().unwrap(), QuestionMark))));
+        assert_eq!(l.next(), Some(Ok(Token::new(1, 34, 4, None, lines.peek().unwrap(), Identifier("time")))));
+        assert_eq!(l.next(), Some(Ok(Token::new(1, 38, 1, None, lines.peek().unwrap(), CloseParenthesis))));
         lines.next();
         assert_eq!(l.next(), Some(Ok(Token::new(2, 1, 1, None, lines.peek().unwrap(), CloseParenthesis))));
         assert_eq!(l.next(), Some(Ok(Token::new(2, 2, 1, None, lines.peek().unwrap(), CloseParenthesis))));
