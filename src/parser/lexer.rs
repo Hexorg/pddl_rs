@@ -1,10 +1,10 @@
 use std::iter::Peekable;
 use std::str::{CharIndices, Lines};
 
-use super::tokens::{Token, Span, TokenKind, BinOpToken, KeywordToken, Literal};
+use super::tokens::{Token, Span, TokenKind, OpToken, KeywordToken, Literal};
 use super::Error;
 use TokenKind::*;
-use BinOpToken::*;
+use OpToken::*;
 use KeywordToken::*;
 
 
@@ -45,41 +45,38 @@ impl<'a> Iterator for Lexer<'a> {
                     '(' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), OpenParenthesis))),
                     ')' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), CloseParenthesis))),
                     ',' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Comma))),
-                    '|' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Or)))),
-                    '&' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(And)))),
+                    '|' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Or)))),
+                    '&' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(And)))),
                     '.' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Dot))),
                     '?' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), QuestionMark))),
-                    '=' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(EqualsEquals)); self.it.next(); Some(Ok(t))}
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Equals))),
-                    },
+                    '=' => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Equals)))),
                     '-' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(SubtractFrom)); self.it.next(); Some(Ok(t))}
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Minus)))),
+                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), Op(SubtractFrom)); self.it.next(); Some(Ok(t))}
+                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Minus)))),
                     },
                     '+' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(AddTo)); self.it.next(); Some(Ok(t))}
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Plus)))),
+                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), Op(AddTo)); self.it.next(); Some(Ok(t))}
+                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Plus)))),
                     },
                     '/' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(DivideBy)); self.it.next(); Some(Ok(t))}
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Slash)))),
+                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), Op(DivideBy)); self.it.next(); Some(Ok(t))}
+                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Slash)))),
                     },
                     '*' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(MultiplyBy)); self.it.next(); Some(Ok(t))}
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Star)))),
+                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), Op(MultiplyBy)); self.it.next(); Some(Ok(t))}
+                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Star)))),
                     },
                     '>' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(GreaterOrEquals)); self.it.next(); Some(Ok(t))}
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Greater)))),
+                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), Op(GreaterOrEquals)); self.it.next(); Some(Ok(t))}
+                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Greater)))),
                     },
                     '<' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(SmallerOrEquals)); self.it.next(); Some(Ok(t))}
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Smaller)))),
+                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), Op(SmallerOrEquals)); self.it.next(); Some(Ok(t))}
+                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Smaller)))),
                     },
                     '!' => match self.it.peek() {
-                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), BinOp(NotEquals)); self.it.next(); Some(Ok(t))},
-                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Not))))
+                        Some((_, '=')) => {let t = Token::new(self.line, self.col, 2, self.filename.clone(), self.lines.peek().unwrap(), Op(NotEquals)); self.it.next(); Some(Ok(t))},
+                        _ => Some(Ok(Token::new(self.line, self.col, 1, self.filename.clone(), self.lines.peek().unwrap(), Op(Not))))
                     },
                     '"' => {Some(self.string(offset))},
                     c if c.is_whitespace() => { 
@@ -174,13 +171,41 @@ impl<'a> Lexer<'a> {
             "condition" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Condition))),
             "duration" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Duration))),
             "effect" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Effect))),
+            "metric" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Metric))),
+            "length" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Length))),
+            "preference" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Preference))),
 
             "objects" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Objects))),
             "init" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Init))),
             "goal" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Goal))),
             
-            "not" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), BinOp(Not))),
-            "and" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), BinOp(And))),
+            "assign" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Assign))),
+            "scaleUp" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(ScaleUp))),
+            "scaleDown" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(ScaleDown))),
+            "increase" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Increase))),
+            "decrease" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Decrease))),
+            "forall" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Forall))),
+            "at" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(At))),
+            "end" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(End))),
+            "when" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(When))),
+            "start" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Start))),
+            "over" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Over))),
+            "all" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(All))),
+            "always" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Always))),
+            "sometime" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Sometime))),
+            "within" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Within))),
+            "at-most-once" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(AtMostOnce))),
+            "sometime-after" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(SometimeAfter))),
+            "sometime-before" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(SometimeBefore))),
+            "always-within" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(AlwaysWithin))),
+            "hold-during" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(HoldDuring))),
+            "hold-after" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(HoldAfter))),
+            "either" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Either))),
+            "imply" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Keyword(Imply))),
+
+            "or" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Op(Or))),
+            "not" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Op(Not))),
+            "and" => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Op(And))),
         
             _ => Ok(Token::new(self.line, self.col, len, self.filename.clone(), self.lines.peek().unwrap(), Identifier(slice)))
         };
@@ -190,7 +215,7 @@ impl<'a> Lexer<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lexer, Token, TokenKind::*, BinOpToken::*};
+    use super::{Lexer, Token, TokenKind::*, OpToken::*};
     #[test]
     fn test_include() {
         let code = "((:operator (!drive ?x ?y ?z ?start ?time)\n))";
@@ -201,7 +226,7 @@ mod tests {
         assert_eq!(l.next(), Some(Ok(Token::new(1, 3, 1, None, lines.peek().unwrap(), Colon))));
         assert_eq!(l.next(), Some(Ok(Token::new(1, 4, 8, None, lines.peek().unwrap(), Identifier("operator")))));
         assert_eq!(l.next(), Some(Ok(Token::new(1, 13, 1, None, lines.peek().unwrap(), OpenParenthesis))));
-        assert_eq!(l.next(), Some(Ok(Token::new(1, 14, 1, None, lines.peek().unwrap(), BinOp(Not)))));
+        assert_eq!(l.next(), Some(Ok(Token::new(1, 14, 1, None, lines.peek().unwrap(), Op(Not)))));
         assert_eq!(l.next(), Some(Ok(Token::new(1, 15, 5, None, lines.peek().unwrap(), Identifier("drive")))));
         assert_eq!(l.next(), Some(Ok(Token::new(1, 21, 1, None, lines.peek().unwrap(), QuestionMark))));
         assert_eq!(l.next(), Some(Ok(Token::new(1, 22, 1, None, lines.peek().unwrap(), Identifier("x")))));

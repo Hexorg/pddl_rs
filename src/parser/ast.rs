@@ -1,5 +1,7 @@
 use enumset::{EnumSet, EnumSetType};
 
+use super::tokens::Literal;
+
 #[derive(PartialEq, Debug)]
 pub enum Stmt<'a> {
     Domain(Domain<'a>),
@@ -27,23 +29,30 @@ pub struct Problem<'a> {
     pub name: &'a str,
     pub domain: &'a str,
     pub requirements: EnumSet<Requirements>,
-    pub objects: Vec<TypedList<'a>>,
-    pub init: Expr<'a>,
-    pub goal: Expr<'a>,
-    // pub constraints: &'a str,
-    // pub metric: &'a str,
-    // pub length: &'a str
+    pub objects: Vec<List<'a>>,
+    pub init: Vec<Init<'a>>,
+    pub goal: PreconditionExpr<'a>,
+    pub constraints: Option<PrefConstraintGD<'a>>,
+    pub metric: Option<Metric<'a>>,
+    pub length: Option<LengthSpecification<'a>>
 }
+
+#[derive(PartialEq, Debug)]
+pub struct LengthSpecification<'a> {
+    serial: Option<Literal<'a>>,
+    parallel: Option<Literal<'a>>
+}
+
 
 #[derive(PartialEq, Debug)]
 pub struct Domain<'a> {
     pub name: &'a str,
     pub requirements: EnumSet<Requirements>,
-    pub types: Vec<TypedList<'a>>,
-    pub constants: Vec<TypedList<'a>>,
-    pub predicates: Vec<CallableDeclaration<'a>>,
+    pub types: Vec<List<'a>>,
+    pub constants: Vec<List<'a>>,
+    pub predicates: Vec<AtomicFSkeleton<'a>>,
     pub functions: Vec<TypedFunction<'a>>,
-    pub constraints: Option<Expr<'a>>,
+    pub constraints: Option<ConstraintGD<'a>>,
     pub actions: Vec<Action<'a>>,
 }
 
@@ -144,42 +153,169 @@ impl std::fmt::Display for Requirements {
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Expr<'a> {
-    And(Vec<Expr<'a>>),
-    Or(Vec<Expr<'a>>),
-    Not(Box<Expr<'a>>),
-    Call{function:&'a str, variables:Vec<&'a str>}, // :object-fluents
-    Subtract(Box<Expr<'a>>, Box<Expr<'a>>), // :numeric-fluents
-    Add(Box<Expr<'a>>, Vec<Expr<'a>>), // :numeric-fluents
-    Divide(Box<Expr<'a>>, Box<Expr<'a>>), // :numeric-fluents
-    Multiply(Box<Expr<'a>>, Vec<Expr<'a>>), // :numeric-fluents
-    LessThan(Box<Expr<'a>>, Box<Expr<'a>>), // :numeric-fluents
-    LessThanOrEquals(Box<Expr<'a>>, Box<Expr<'a>>),
-    Equals(Box<Expr<'a>>, Box<Expr<'a>>),
-    BiggerThan(Box<Expr<'a>>, Box<Expr<'a>>),
-    BiggerThanOrEquals(Box<Expr<'a>>, Box<Expr<'a>>),
-    Imply(Box<Expr<'a>>, Box<Expr<'a>>),
-    Exists{variables:TypedList<'a>, expr:Box<Expr<'a>>},
-    Forall{variables:TypedList<'a>, expr:Box<Expr<'a>>}, // :conditional−effects
-    Preference{name: &'a str, expr:Box<Expr<'a>>},
-    When{condition:Box<Expr<'a>>, effect:Box<Expr<'a>>}, // :conditional−effects
-    AtomicFormula{predicate:&'a str, term:Vec<&'a str>},
-    Literal{name:&'a str, variables:Vec<&'a str>}
+pub enum PreconditionExpr<'a> {
+    And(Vec<PreconditionExpr<'a>>),
+    Forall(Vec<List<'a>>, Box<PreconditionExpr<'a>>), // :universal−preconditions or // :conditional−effects
+    Preference(Option<&'a str>, GD<'a>), // :preferences
+    GD(GD<'a>)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum GD<'a> {
+    AtomicFormula(&'a str, Vec<Term<'a>>),
+    AtomicEquality(Term<'a>, Term<'a>), // :equality
+    NotAtomicFormula(&'a str, Vec<Term<'a>>), // :negative−preconditions
+    NotAtomicEquality(Term<'a>, Term<'a>), // :equality AND :negative−preconditions
+    And(Vec<GD<'a>>), // not(and(f1, f2, f2)) is legal, but not(and(Preference, Preference, Preference)) is not, 
+                      // however and(Preference, Preference, Preference) is legal. That's why GD has And too.
+    Or(Vec<GD<'a>>), //:disjunctive−preconditions
+    Not(Box<GD<'a>>), // :disjunctive−preconditions
+    Imply(Box<(GD<'a>, GD<'a>)>), // :disjunctive−preconditions
+    Exists(Vec<List<'a>>, Box<GD<'a>>), // :existential−preconditions
+    Forall(Vec<List<'a>>, Box<GD<'a>>), // :universal−preconditions
+    
+    LessThan(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
+    LessThanOrEqual(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
+    Equal(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
+    GreatherThanOrEqual(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
+    GreaterThan(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
+}
+
+#[derive(PartialEq, Debug)]
+pub enum FluentExpression<'a> {
+    Number(Literal<'a>), // :numeric-fluents
+    Subtract(Box<(FluentExpression<'a>, FluentExpression<'a>)>), // :numeric-fluents
+    Divide(Box<(FluentExpression<'a>, FluentExpression<'a>)>), // :numeric-fluents
+    Add(Vec<FluentExpression<'a>>), // :numeric-fluents
+    Multiply(Vec<FluentExpression<'a>>), // :numeric-fluents
+    Function(FunctionTerm<'a>), // :numeric-fluents
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Effect<'a> {
+    And(Vec<Effect<'a>>),
+    Forall(Vec<List<'a>>, Box<Effect<'a>>), // :conditional−effects
+    When(GD<'a>, Vec<Effect<'a>>), // :conditional−effects
+    AtomicFormula(&'a str, Vec<Term<'a>>),
+    NotAtomicFormula(&'a str, Vec<Term<'a>>),
+    Assign(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
+    AssignUndefined(FunctionTerm<'a>), // :object-fluents
+    ScaleUp(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
+    ScaleDown(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
+    Increase(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
+    Decrease(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
+}
+
+#[derive(PartialEq, Debug)]
+pub enum DurationConstraint<'a> {
+    And(Vec<DurationConstraint<'a>>), // :duration−inequalities
+    AtStart(Box<DurationConstraint<'a>>), 
+    AtEnd(Box<DurationConstraint<'a>>),
+    GreaterOrEquals(FluentExpression<'a>), // :duration−inequalities
+    LessThanOrEquals(FluentExpression<'a>), // :duration−inequalities
+    Equals(FluentExpression<'a>),
+}
+
+#[derive(PartialEq, Debug)]
+pub enum DurationGD<'a> {
+    And(Vec<DurationGD<'a>>),
+    Forall(Vec<List<'a>>, Box<DurationGD<'a>>), // :universal−preconditions
+    Preference(Option<&'a str>, TimedGD<'a>), // :preferences
+    GD(TimedGD<'a>)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum DurationEffect<'a> {
+    And(Vec<DurationEffect<'a>>),
+    Forall(Vec<List<'a>>, Box<DurationEffect<'a>>), // :universal−preconditions
+    When(DurationGD<'a>, TimedEffect<'a>), // :conditional−effects
+    GD(TimedEffect<'a>),
+}
+
+#[derive(PartialEq, Debug)]
+pub enum PrefConstraintGD<'a> {
+    And(Vec<PrefConstraintGD<'a>>),
+    Forall(Vec<List<'a>>, Box<PrefConstraintGD<'a>>), // :universal−preconditions
+    Preference(&'a str, ConstraintGD<'a>), // :preferences
+    GD(ConstraintGD<'a>)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum ConstraintGD<'a> {
+    And(Vec<ConstraintGD<'a>>),
+    Forall(Vec<List<'a>>, Box<ConstraintGD<'a>>),
+    AtEnd(GD<'a>),
+    Always(GD<'a>),
+    Sometime(GD<'a>),
+    Within(Literal<'a>, GD<'a>),
+    AtMostOnce(GD<'a>),
+    SometimeAfter(GD<'a>, GD<'a>),
+    SometimeBefore(GD<'a>, GD<'a>),
+    AlwaysWithin(Literal<'a>, GD<'a>, GD<'a>),
+    HoldDuring(Literal<'a>, Literal<'a>, GD<'a>),
+    HoldAfter(Literal<'a>, GD<'a>)
+}
+
+
+#[derive(PartialEq, Debug)]
+pub enum TimedEffect<'a> {
+    AtStart(Effect<'a>),
+    AtEnd(Effect<'a>),
+    Effect(Effect<'a>)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Init<'a> {
+    AtomicFormula(&'a str, Vec<Term<'a>>),
+    NotAtomicFormula(&'a str, Vec<Term<'a>>), // :negative−preconditions
+    At(Literal<'a>, Vec<Term<'a>>), // :timed−initial−literals
+    NotAt(Literal<'a>, Vec<Term<'a>>), // :timed−initial−literals
+    Equals(FunctionTerm<'a>, Literal<'a>), // :numeric-fluents
+    Is(FunctionTerm<'a>, Term<'a>), // :object-fluents
+}
+
+#[derive(PartialEq, Debug)]
+pub enum TimedGD<'a> {
+    AtStart(GD<'a>),
+    AtEnd(GD<'a>),
+    OverAll(GD<'a>)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum MetricFluentExpr<'a> {
+    FExpr(FluentExpression<'a>),
+    TotalTime(),
+    IsViolated(&'a str)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Metric<'a> {
+    Minimize(MetricFluentExpr<'a>),
+    Maximize(MetricFluentExpr<'a>)
 }
 
 #[derive(PartialEq, Debug)]
 pub enum Action<'a> {
     Basic(BasicAction<'a>),
-    Durative{a:BasicAction<'a>, duration:Expr<'a>},
-    Derived{predicate:CallableDeclaration<'a>, expr:Expr<'a>}
+    Durative(DurativeAction<'a>), // :durative−actions
+    Derived(AtomicFSkeleton<'a>, GD<'a>) // :derived−predicates
 }
 
 #[derive(PartialEq, Debug)]
 pub struct BasicAction<'a> {
     pub name:&'a str, 
-    pub parameters: Vec<TypedList<'a>>, 
-    pub precondition:Option<Expr<'a>>, 
-    pub effect:Option<Expr<'a>>
+    pub parameters: Vec<List<'a>>, 
+    pub precondition:Option<PreconditionExpr<'a>>, 
+    pub effect:Option<Effect<'a>>
+}
+
+#[derive(PartialEq, Debug)]
+pub struct DurativeAction<'a> {
+    pub name:&'a str, 
+    pub parameters: Vec<List<'a>>, 
+    pub duration: DurationConstraint<'a>,
+    pub condition: Option<DurationGD<'a>>, 
+    pub effect:Option<DurationEffect<'a>>
 }
 
 /// Structure used for both Predicates and Functions
@@ -196,9 +332,9 @@ pub struct BasicAction<'a> {
 /// ```
 /// So they are really the same, just used differently.
 #[derive(PartialEq, Debug)]
-pub struct CallableDeclaration<'a> {
+pub struct AtomicFSkeleton<'a> {
     pub name: &'a str,
-    pub variables: Vec<TypedList<'a>>
+    pub variables: Vec<List<'a>>
 }
 
 
@@ -212,13 +348,24 @@ pub enum FunctionTypeKind<'a> {
 
 #[derive(PartialEq, Debug)]
 pub struct TypedFunction<'a> {
-    pub function: CallableDeclaration<'a>,
+    pub function: AtomicFSkeleton<'a>,
     pub kind: FunctionTypeKind<'a>
 }
 
 #[derive(PartialEq, Debug)]
-pub struct TypedList<'a> {
-    pub identifiers: Vec<&'a str>,
-    /// kind will be None if `:typing` is not required
-    pub kind:Option<&'a str>, 
+pub enum List<'a> {
+    Basic(Vec<&'a str>),
+    Typed(Vec<&'a str>, &'a str),
+}
+
+#[derive(PartialEq, Debug)]
+pub struct FunctionTerm<'a> {
+    pub name:&'a str,
+    pub terms: Vec<Term<'a>>
+}
+#[derive(PartialEq, Debug)]
+pub enum Term<'a> {
+    Name(&'a str),
+    Variable(&'a str),
+    Function(FunctionTerm<'a>) // :object-fluents
 }
