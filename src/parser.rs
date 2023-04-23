@@ -936,8 +936,8 @@ impl<'a> Parser<'a> {
         use KeywordToken::{At};
         use OpToken::Not;
         let mut vec = Vec::new();
-        expect!(self, {Some(Ok(Token{kind:OpenParenthesis,..})) => Ok(())}, EXPECTED_OPEN_PARENTHESIS)?;
-        while !matches!(self.lexer.peek(), Some(Ok(Token{kind:CloseParenthesis,..}))) {
+        while matches!(self.lexer.peek(), Some(Ok(Token{kind:OpenParenthesis,..}))) {
+            self.lexer.next();
             vec.push(expect!(self, {
                     Some(Ok(Token{kind:Keyword(At),..})) => Ok(Init::At(self.literal()?, self.vec_term(true)?))
                     Some(Ok(Token{kind:Identifier(i),..})) => Ok(Init::AtomicFormula(i, self.vec_term(false)?)),
@@ -947,8 +947,8 @@ impl<'a> Parser<'a> {
                     }, "Expected 'at' or predicate."),
                 }, "Expected at, predicate, or not.")?
             );
+            expect!(self, {Some(Ok(Token{kind:CloseParenthesis,..})) => Ok(())}, EXPECTED_CLOSE_PARENTHESIS)?;
         }
-        expect!(self, {Some(Ok(Token{kind:CloseParenthesis,..})) => Ok(())}, EXPECTED_CLOSE_PARENTHESIS)?;
         Ok(vec)
     }
 
