@@ -1,4 +1,6 @@
-use std::{collections::{HashMap, HashSet}, env::Vars, hash::Hash};
+use std::collections::{HashMap};
+
+use enumset::EnumSet;
 
 use crate::parser::{Error, ast::*};
 
@@ -13,13 +15,37 @@ enum Instruction {
     Or,
     Add, 
     Sub,
+    /// Push immediate
     Push(i64),
+    /// Pop immediate
     Pop(i64),
 
 }
 
+/// Flatenned problem ready for solving
+/// All instrutions use shared memory offsets 
+/// no larger than `self.memory_size`
+#[derive(Debug)]
+pub struct CompiledProblem {
+    memory_size: usize,
+    actions: Vec<CompiledAction>,
+    init: Vec<Instruction>,
+    goal: Vec<Instruction>
+}
+
+/// Flattened representation of Actions inside CompiledProblems
+/// All instruction offsets point to shared memory
 #[derive(Debug)]
 struct CompiledAction {
+    precondition: Vec<Instruction>,
+    effect: Vec<Instruction>,
+}
+
+/// Intermediate representation of Actions stored in domain
+/// All instructions point to parameter indexes instead
+/// of full memory indexes
+#[derive(Debug)]
+struct IntermediateAction {
     parameters: Vec<u16>,
     precondition: Vec<Instruction>,
     effect: Vec<Instruction>,
@@ -36,13 +62,12 @@ enum CompilerContext {
 /// 
 /// Example:
 /// ```rust
+///     use std::fs;
+///     use pddl_rs::{parser::Parser, compiler::Compiler};
 ///     let domain = fs::read_to_string("domain.pddl").unwrap();
-///     let problem = fs::read_to_string("problem_5_10_7.pddl").unwrap();
 ///     let mut parser = Parser::new(domain.as_str(), Some("domain.pddl"));
 ///     let domain = parser.next().unwrap().unwrap().unwrap_domain();
-///     let mut parser = Parser::new(problem.as_str(), Some("problem_5_10_7.pddl"));
-///     let problem = parser.next().unwrap().unwrap().unwrap_problem();
-///     let compiler = match Compiler::new(domain, problem) {
+///     let compiler = match Compiler::new(domain) {
 ///         Ok(c) => c, 
 ///         Err(e) => { println!("{}", e); return },
 ///     };
@@ -51,6 +76,8 @@ enum CompilerContext {
 #[derive(Debug)]
 pub struct Compiler {
     context: CompilerContext,
+    domain_name: String,
+    requirements: EnumSet<Requirements>,
     /// List of all types in the domain
     types: Vec<String>, 
     /// Map of type name to offset of its parent type in the `self.types` vec.
@@ -62,17 +89,21 @@ pub struct Compiler {
     /// Map of predicate name to offset in `self.predicates`
     predicates_map: HashMap<String, usize>,
     /// List of flatenned actions in the domain
-    actions: Vec<CompiledAction>,
+    actions: Vec<IntermediateAction>,
     /// Map of action named to the offset in `self.actions`
     action_map: HashMap<String, usize>,
     /// Map of function named to memory offsets during problem planning
-    function_map: HashMap<String, usize>
+    function_map: HashMap<String, usize>,
+    /// List of actions unable to be performed due to typing constraints
+    disabled_actions: Vec<usize>,
 
 }
 
 impl<'a> Compiler {
-    pub fn new(domain:Domain<'a>, problem:Problem<'a>) -> Result<Self, Error<'a>> {
+    pub fn new(domain:Domain<'a>) -> Result<Self, Error<'a>> {
         let mut compiler = Self{
+            domain_name: domain.name.to_string(),
+            requirements: domain.requirements,
             context: CompilerContext::None,
             types:vec!["object".to_string()],
             type_parents:HashMap::from([("object".to_string(), 0 as u16)]),
@@ -81,13 +112,32 @@ impl<'a> Compiler {
             actions: Vec::new(),
             action_map: HashMap::new(),
             function_map: HashMap::new(),
+            disabled_actions: Vec::new(),
         };
         compiler.build_type_map(&domain);
         compiler.build_predicates(&domain);
         compiler.build_functions(&domain);
         compiler.build_actions(&domain);
-        
         Ok(compiler)
+    }
+
+    pub fn compile_problem(&self, problem:&Problem<'a>) -> Result<CompiledProblem, Error<'a>> {
+        assert_eq!(self.domain_name, problem.domain);
+        if !problem.requirements.is_empty() {
+            assert_eq!(self.requirements, problem.requirements);
+        }
+        let mut objects: Vec<usize> = Vec::new(); // each object is offset, value is type in `self.types`
+        for obj in &problem.objects {
+            match obj {
+                List::Basic(obj) => objects.extend([0 as usize].repeat(obj.len()).iter()),
+                List::Typed(obj, kind) =>{
+                    let (kind_id, _) = self.types.iter().enumerate().find(|t| t.1 == kind).unwrap();
+                    objects.extend([kind_id as usize].repeat(obj.len()).iter())
+                },
+            }
+        }
+
+        Ok(CompiledProblem { memory_size: 0, actions: Vec::new(), init: Vec::new(), goal: Vec::new() })
     }
 
     fn build_type_map(&mut self, domain:&Domain) {
@@ -272,7 +322,7 @@ impl<'a> Compiler {
             self.visit_effect_expr(&mut effect, e);
         }
         self.context = CompilerContext::None;
-        self.actions.push(CompiledAction { parameters, precondition, effect })
+        self.actions.push(IntermediateAction { parameters, precondition, effect })
     }
 
     fn build_actions(&mut self, domain:&Domain) {
@@ -303,10 +353,15 @@ pub mod tests {
         let domain = parser.next().unwrap().unwrap().unwrap_domain();
         let mut parser = Parser::new(problem.as_str(), Some("problem_5_10_7.pddl"));
         let problem = parser.next().unwrap().unwrap().unwrap_problem();
-        let compiler = match Compiler::new(domain, problem) {
+        let compiler = match Compiler::new(domain) {
             Ok(c) => c, 
             Err(e) => { println!("{}", e); return },
         };
         println!("{:?}", compiler);
+        let problem = match compiler.compile_problem(&problem) {
+            Ok(p) => p,
+            Err(e) => { println!("{}", e); return },
+        };
+        println!("{:?}", problem);
     }
 }
