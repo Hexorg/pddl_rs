@@ -4,13 +4,17 @@ use enumset::EnumSet;
 
 use crate::parser::{Error, ast::*};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Instruction {
+    /// Predicate number and vector of offsets to predicate_types vector
     ReadPredicate(u16, Vec<u16>),
+    /// Predicate number and vector of offsets to predicate_types vector
     SetPredicate(u16, Vec<u16>),
+    ReadState(usize),
+    SetState(usize),
     ReadFunction(usize),
     WriteFunction(usize),
-    And,
+    And(usize),
     Not,
     Or,
     Add, 
@@ -25,7 +29,7 @@ enum Instruction {
 /// Flatenned problem ready for solving
 /// All instrutions use shared memory offsets 
 /// no larger than `self.memory_size`
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct CompiledProblem {
     memory_size: usize,
     actions: Vec<CompiledAction>,
@@ -35,7 +39,7 @@ pub struct CompiledProblem {
 
 /// Flattened representation of Actions inside CompiledProblems
 /// All instruction offsets point to shared memory
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct CompiledAction {
     precondition: Vec<Instruction>,
     effect: Vec<Instruction>,
@@ -44,17 +48,33 @@ struct CompiledAction {
 /// Intermediate representation of Actions stored in domain
 /// All instructions point to parameter indexes instead
 /// of full memory indexes
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct IntermediateAction {
-    parameters: Vec<u16>,
+    parameter_types: Vec<u16>,
     precondition: Vec<Instruction>,
     effect: Vec<Instruction>,
 }
 
-#[derive(Debug)]
+/// Structure used to build objects that span multiple AST nodes and
+/// require knowing build context
+#[derive(Debug, PartialEq)]
 enum CompilerContext {
     None,
-    Action{parameters_map:HashMap<String, usize>},
+    Action {
+        /// Map of parameter names to position in parameter_types vector
+        parameters_map:HashMap<String, usize>
+    },
+    Problem{
+        /// Map of \[predicate, param1, param2, ..., paramN\] vectors to memory offsets that 
+        /// that combination of params represents 
+        memory_map:HashMap<Vec<u16>, usize>, 
+        actions:Vec<CompiledAction>}
+}
+
+impl Default for CompilerContext {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 /// Compiles parsed Domain and Problem to efficient representations
@@ -73,7 +93,7 @@ enum CompilerContext {
 ///     };
 ///     println!("{:?}", compiler);
 /// ```
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Compiler {
     context: CompilerContext,
     domain_name: String,
@@ -94,10 +114,8 @@ pub struct Compiler {
     action_map: HashMap<String, usize>,
     /// Map of function named to memory offsets during problem planning
     function_map: HashMap<String, usize>,
-    /// List of actions unable to be performed due to typing constraints
-    disabled_actions: Vec<usize>,
-
 }
+
 
 impl<'a> Compiler {
     pub fn new(domain:Domain<'a>) -> Result<Self, Error<'a>> {
@@ -112,16 +130,15 @@ impl<'a> Compiler {
             actions: Vec::new(),
             action_map: HashMap::new(),
             function_map: HashMap::new(),
-            disabled_actions: Vec::new(),
         };
-        compiler.build_type_map(&domain);
-        compiler.build_predicates(&domain);
-        compiler.build_functions(&domain);
-        compiler.build_actions(&domain);
+        compiler.visit_domain_type_map(&domain);
+        compiler.visit_domain_predicates(&domain);
+        compiler.visit_domain_functions(&domain);
+        compiler.visit_domain_actions(&domain);
         Ok(compiler)
     }
 
-    pub fn compile_problem(&self, problem:&Problem<'a>) -> Result<CompiledProblem, Error<'a>> {
+    pub fn compile_problem(&mut self, problem:&Problem<'a>) -> Result<CompiledProblem, Error<'a>> {
         assert_eq!(self.domain_name, problem.domain);
         if !problem.requirements.is_empty() {
             assert_eq!(self.requirements, problem.requirements);
@@ -136,11 +153,96 @@ impl<'a> Compiler {
                 },
             }
         }
-
-        Ok(CompiledProblem { memory_size: 0, actions: Vec::new(), init: Vec::new(), goal: Vec::new() })
+        self.context = CompilerContext::Problem { memory_map:HashMap::new(), actions: Vec::new() };
+        for action_index in 0..self.actions.len() {
+            self.create_permutated_actions(&objects, &[], 0, action_index);
+        }
+        if let CompilerContext::Problem { memory_map, actions } = std::mem::take(&mut self.context) {
+            println!("Memory map: {:?}", memory_map);
+            Ok(CompiledProblem { memory_size:memory_map.len(), actions, init: Vec::new(), goal: Vec::new() })
+        } else {
+            todo!("Create error here.")
+        }
     }
 
-    fn build_type_map(&mut self, domain:&Domain) {
+    /// Replace Predicate(n, params) instructions with read/writing states at offsets
+    /// Used in going from [IntermediateAction] to [CompiledAction]
+    fn substitude(memory_map:&mut HashMap<Vec<u16>, usize>, parameter_objects:&[usize], instructions:&[Instruction]) -> Vec<Instruction> {
+        // TODO: optimize for cache locality by making instruction sets read from nearby memory regions where possible
+        let mut new_instructions = Vec::new();
+        for instr in instructions {
+            new_instructions.push(match instr {
+                Instruction::ReadPredicate(pid, param_offsets) => {
+                    let mut  map_vector = vec![*pid];
+                    map_vector.extend(param_offsets.iter().map(|t| parameter_objects[*t as usize] as u16));
+                    if let Some(offset) = memory_map.get(&map_vector) {
+                        Instruction::ReadState(*offset)
+                    } else {
+                        let offset = memory_map.len();
+                        memory_map.insert(map_vector, offset);
+                        Instruction::ReadState(offset)
+
+                    }
+                },
+                Instruction::SetPredicate(pid, param_offsets) => {
+                    let mut  map_vector = vec![*pid];
+                    map_vector.extend(param_offsets.iter().map(|t| parameter_objects[*t as usize] as u16));
+                    if let Some(offset) = memory_map.get(&map_vector) {
+                        Instruction::SetState(*offset)
+                    } else {
+                        let offset = memory_map.len();
+                        memory_map.insert(map_vector, offset);
+                        Instruction::SetState(offset)
+
+                    }
+                },
+                Instruction::ReadState(_) => panic!("Unexpected instruction."),
+                Instruction::SetState(_) => panic!("Unexpected instruction."),
+                Instruction::ReadFunction(i) => Instruction::ReadFunction(*i),
+                Instruction::WriteFunction(i) => Instruction::WriteFunction(*i),
+                Instruction::And(i) => Instruction::And(*i), 
+                Instruction::Not => Instruction::Not,
+                Instruction::Or => Instruction::Or,
+                Instruction::Add => Instruction::Add,
+                Instruction::Sub => Instruction::Sub,
+                Instruction::Push(i) => Instruction::Push(*i),
+                Instruction::Pop(i) => Instruction::Pop(*i), 
+            });
+        }
+        new_instructions
+    }
+
+    /// If a predicate uses one parameter - then it will crate as many actions as there are objects of that parameter type
+    /// but if a predicate uses more than one parameter it will create (n choose k) actions, where n is count of objects that match 
+    /// types, and k is parameter count. This is the same case for one parameter, but (n choose 1) == n
+    fn create_permutated_actions(&mut self, objects:&Vec<usize>, parameter_objects:&[usize], parameter_index: usize, action_index: usize) {
+        let action = self.actions.get(action_index).unwrap();
+        // action.parameters.len() is k
+        if parameter_index == action.parameter_types.len() {
+            if let CompilerContext::Problem { memory_map, actions } = &mut self.context {
+                let c_prec = Compiler::substitude(memory_map, parameter_objects, &action.precondition);
+                let c_eff = Compiler::substitude(memory_map, parameter_objects, &action.effect);
+                actions.push(CompiledAction { precondition: c_prec, effect: c_eff });
+            } else {
+                panic!("Expected to have Problem build context.");
+            }
+        } else {
+            let param_type = *action.parameter_types.get(parameter_index).unwrap();
+            // this loop iterates n times
+            let mut parameter_objects = parameter_objects.to_vec();
+            parameter_objects.push(0);
+            for object_pos in objects.iter().enumerate().filter_map(|(pos, kind)| if (*kind) as u16 == param_type { Some(pos) } else { None }) {
+                if parameter_objects.iter().find(|t| **t == object_pos).is_none() {
+                    parameter_objects[parameter_index] = object_pos;
+                    self.create_permutated_actions(objects, &parameter_objects, parameter_index+1, action_index);
+                }
+            }
+        }
+    }
+
+
+
+    fn visit_domain_type_map(&mut self, domain:&Domain) {
         if domain.requirements.contains(crate::parser::ast::Requirements::Typing) {
             for r#type in &domain.types {
                 match r#type {
@@ -167,7 +269,7 @@ impl<'a> Compiler {
         }
     }
 
-    fn build_predicates(&mut self, domain:&Domain) {
+    fn visit_domain_predicates(&mut self, domain:&Domain) {
         for AtomicFSkeleton{name, variables} in &domain.predicates {
             let name = name.to_string();
             let mut out_variables = Vec::new();
@@ -187,7 +289,7 @@ impl<'a> Compiler {
         }
     }
 
-    fn build_functions(&mut self, domain:&Domain) {
+    fn visit_domain_functions(&mut self, domain:&Domain) {
         for TypedFunction{function, kind} in &domain.functions {
             if domain.requirements.contains(Requirements::ActionCosts) {
                 assert_eq!(function.name, "total-cost");
@@ -200,6 +302,7 @@ impl<'a> Compiler {
         }
     }
 
+    /// Convert predicate AST to [Instruction]
     fn predicate(&mut self, is_read:bool, name:&str, params:&Vec<Term>) -> Instruction {
         let id = *self.predicates_map.get(name).unwrap() as u16;
         let mut vars = Vec::new();
@@ -209,6 +312,7 @@ impl<'a> Compiler {
                 Term::Function(_) => todo!(),
                 Term::Variable(var) => match &self.context {
                     CompilerContext::None => todo!(),
+                    CompilerContext::Problem { .. } => panic!("Unexpected compiler context while building predicates."),
                     CompilerContext::Action { parameters_map } => vars.push(*parameters_map.get(*var).unwrap() as u16),
                 },
             }
@@ -243,7 +347,7 @@ impl<'a> Compiler {
 
     fn visit_precondition_expr(&mut self, instructions:&mut Vec<Instruction>, expr:&PreconditionExpr) {
         match expr {
-            PreconditionExpr::And(v) => for p in v { self.visit_precondition_expr(instructions, p)},
+            PreconditionExpr::And(v) => { for p in v { self.visit_precondition_expr(instructions, p); } instructions.push(Instruction::And(v.len())); },
             PreconditionExpr::Forall(_, _) => todo!(),
             PreconditionExpr::Preference(_, _) => todo!(),
             PreconditionExpr::GD(gd) => self.visit_gd(instructions, gd),
@@ -253,7 +357,7 @@ impl<'a> Compiler {
 
     fn visit_effect_expr(&mut self, instructions:&mut Vec<Instruction>, expr:&Effect) {
         match expr {
-            Effect::And(v) => for e in v { self.visit_effect_expr(instructions, e)},
+            Effect::And(v) => { for e in v { self.visit_effect_expr(instructions, e); }},
             Effect::Forall(_, _) => todo!(),
             Effect::When(_, _) => todo!(),
             Effect::AtomicFormula(name, params) => instructions.push(self.predicate(false, name, params)),
@@ -267,7 +371,7 @@ impl<'a> Compiler {
             Effect::ScaleDown(_, _) => todo!(),
             Effect::Increase(function, fluent) => {
                 let function_id = *self.function_map.get(function.name).unwrap();
-                let value = self.fluent_expression(fluent);
+                let value = self.visit_fluent_expression(fluent);
                 instructions.push(Instruction::Push(value));
                 instructions.push(Instruction::ReadFunction(function_id));
                 instructions.push(Instruction::Add);
@@ -277,7 +381,7 @@ impl<'a> Compiler {
         }
     }
 
-    fn fluent_expression(&mut self, fluent:&FluentExpression) -> i64 {
+    fn visit_fluent_expression(&mut self, fluent:&FluentExpression) -> i64 {
         match fluent {
             FluentExpression::Number(l) => match l {
                 crate::parser::tokens::Literal::I(i) => *i,
@@ -293,21 +397,21 @@ impl<'a> Compiler {
         }
     }
 
-    fn add_basic_action(&mut self, action:&BasicAction) {
+    fn visit_basic_action(&mut self, action:&BasicAction) {
         self.action_map.insert(action.name.to_string(), self.actions.len());
-        let mut parameters = Vec::new();
+        let mut parameter_types = Vec::new();
         let mut parameters_map = HashMap::new();
         for param in &action.parameters {
             match param {
                 List::Basic(params) => for p in params {
-                    parameters_map.insert(p.to_string(), parameters.len());
-                    parameters.push(0);
+                    parameters_map.insert(p.to_string(), parameter_types.len());
+                    parameter_types.push(0);
                 }
                 List::Typed(params, kind) => {
                     let (kind_id, _) = self.types.iter().enumerate().find(|t| t.1 == kind).unwrap();
                     for p in params {
-                        parameters_map.insert(p.to_string(), parameters.len());
-                        parameters.push(kind_id as u16);
+                        parameters_map.insert(p.to_string(), parameter_types.len());
+                        parameter_types.push(kind_id as u16);
                     }
                 },
             }
@@ -321,14 +425,15 @@ impl<'a> Compiler {
         if let Some(e) = &action.effect {
             self.visit_effect_expr(&mut effect, e);
         }
+        // TODO: Filter unused parameters
         self.context = CompilerContext::None;
-        self.actions.push(IntermediateAction { parameters, precondition, effect })
+        self.actions.push(IntermediateAction { parameter_types, precondition, effect })
     }
 
-    fn build_actions(&mut self, domain:&Domain) {
+    fn visit_domain_actions(&mut self, domain:&Domain) {
         for action in &domain.actions {
             match action {
-                Action::Basic(ba) => self.add_basic_action(ba),
+                Action::Basic(ba) => self.visit_basic_action(ba),
                 Action::Durative(_) => todo!(),
                 Action::Derived(_, _) => todo!(),
             }
@@ -339,21 +444,21 @@ impl<'a> Compiler {
 
 #[cfg(test)]
 pub mod tests {
-    use std::fs;
+    use std::{fs, collections::HashMap};
 
-    use crate::parser::Parser;
+    use crate::{parser::{Parser, ast::Requirements}, compiler::{CompilerContext, IntermediateAction, Instruction}};
 
     use super::Compiler;
 
     #[test]
-    fn test_basic() {
+    fn test_from_file() {
         let domain = fs::read_to_string("domain.pddl").unwrap();
         let problem = fs::read_to_string("problem_5_10_7.pddl").unwrap();
         let mut parser = Parser::new(domain.as_str(), Some("domain.pddl"));
         let domain = parser.next().unwrap().unwrap().unwrap_domain();
         let mut parser = Parser::new(problem.as_str(), Some("problem_5_10_7.pddl"));
         let problem = parser.next().unwrap().unwrap().unwrap_problem();
-        let compiler = match Compiler::new(domain) {
+        let mut compiler = match Compiler::new(domain) {
             Ok(c) => c, 
             Err(e) => { println!("{}", e); return },
         };
@@ -362,6 +467,36 @@ pub mod tests {
             Ok(p) => p,
             Err(e) => { println!("{}", e); return },
         };
-        println!("{:?}", problem);
+        println!("Memory size: {}", problem.memory_size);
+        println!("First action: {:?}", problem.actions.get(0).unwrap());
+        println!("Total actions: {}", problem.actions.len());
+    }
+
+    #[test]
+    fn test_domain() {
+        let mut parser = Parser::new("(define (domain barman) (:requirements :strips :typing) 
+        (:types container hand beverage - object) 
+        (:predicates (ontable ?c - container) (holding ?h - hand ?c - container) (handempty ?h - hand))
+        (:action grasp :parameters (?c - container ?h - hand) 
+            :precondition (and (ontable ?c) (handempty ?h)) 
+            :effect (and (not (ontable ?c)) (not (handempty ?h)) (holding ?h ?c))
+        ))", None);
+        let domain = parser.next().unwrap().unwrap().unwrap_domain();
+        let compiler = match Compiler::new(domain) {
+            Ok(c) => c,
+            Err(e) => { println!("{}", e); return; },
+        };
+        assert_eq!(Compiler{ context: CompilerContext::None, 
+            domain_name: String::from("barman"), 
+            requirements: Requirements::Strips | Requirements::Typing, 
+            types: vec![String::from("object"), String::from("container"), String::from("hand"), String::from("beverage")], 
+            type_parents: HashMap::from_iter(vec![(String::from("object"), 0 as u16), (String::from("container"), 0 as u16), (String::from("hand"), 0 as u16), (String::from("beverage"), 0 as u16)]), 
+            predicates: vec![vec![1], vec![2, 1], vec![2]], 
+            predicates_map: HashMap::from_iter(vec![(String::from("ontable"), 0), (String::from("holding"), 1), (String::from("handempty"), 2)]), 
+            actions: vec![IntermediateAction{ parameter_types: vec![1, 2],
+                precondition: vec![Instruction::ReadPredicate(0, vec![0]), Instruction::ReadPredicate(2, vec![1]), Instruction::And(2)], 
+                effect: vec![Instruction::Not, Instruction::SetPredicate(0, vec![0]), Instruction::Not, Instruction::SetPredicate(2, vec![1]), Instruction::SetPredicate(1, vec![1, 0])] }], 
+            action_map: HashMap::from_iter(vec![(String::from("grasp"), 0)]), 
+            function_map: HashMap::new() }, compiler);
     }
 }
