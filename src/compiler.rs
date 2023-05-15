@@ -1,4 +1,4 @@
-use std::collections::{HashMap};
+use std::{collections::{HashMap}, hash::Hash};
 
 use enumset::EnumSet;
 
@@ -91,11 +91,16 @@ impl Default for CompilerContext {
 ///         Ok(c) => c, 
 ///         Err(e) => { println!("{}", e); return },
 ///     };
-///     println!("{:?}", compiler);
+///     let problem = fs::read_to_string("problem.pddl").unwrap();
+///     let mut parser = Parser::new(problem.as_str(), Some("problem.pddl"));
+///     let problem = parser.next().unwrap().unwrap().unwrap_problem();
+///     let compiled_problem = compiler.compile_problem(&problem).unwrap();
+///     println!("{:?}", compiled_problem);
 /// ```
 #[derive(Debug, PartialEq)]
 pub struct Compiler {
     context: CompilerContext,
+    // *** DOMAIN DATA ***
     domain_name: String,
     requirements: EnumSet<Requirements>,
     /// List of all types in the domain
@@ -114,6 +119,11 @@ pub struct Compiler {
     action_map: HashMap<String, usize>,
     /// Map of function named to memory offsets during problem planning
     function_map: HashMap<String, usize>,
+    // *** PROBLEM DATA ***
+    /// Array of offsets into `self.types` each item represent object type
+    objects: Vec<usize>,
+    /// Map of object names to offsets in `self.objects`
+    object_map: HashMap<String, usize>
 }
 
 
@@ -130,6 +140,8 @@ impl<'a> Compiler {
             actions: Vec::new(),
             action_map: HashMap::new(),
             function_map: HashMap::new(),
+            objects: Vec::new(),
+            object_map: HashMap::new(),
         };
         compiler.visit_domain_type_map(&domain);
         compiler.visit_domain_predicates(&domain);
@@ -143,26 +155,51 @@ impl<'a> Compiler {
         if !problem.requirements.is_empty() {
             assert_eq!(self.requirements, problem.requirements);
         }
-        let mut objects: Vec<usize> = Vec::new(); // each object is offset, value is type in `self.types`
         for obj in &problem.objects {
             match obj {
-                List::Basic(obj) => objects.extend([0 as usize].repeat(obj.len()).iter()),
+                List::Basic(obj) => {
+                    for name in obj {
+                        self.object_map.insert((*name).to_owned(), self.objects.len());
+                        self.objects.push(0);
+                    }
+                },
                 List::Typed(obj, kind) =>{
                     let (kind_id, _) = self.types.iter().enumerate().find(|t| t.1 == kind).unwrap();
-                    objects.extend([kind_id as usize].repeat(obj.len()).iter())
+                    for name in obj {
+                        self.object_map.insert((*name).to_owned(), self.objects.len());
+                        self.objects.push(kind_id as usize);
+                    }
                 },
             }
         }
         self.context = CompilerContext::Problem { memory_map:HashMap::new(), actions: Vec::new() };
         for action_index in 0..self.actions.len() {
-            self.create_permutated_actions(&objects, &[], 0, action_index);
+            self.create_permutated_actions(&[], 0, action_index);
         }
+        let init = self.visit_init(&problem.init);
+        let mut goal = Vec::new();
+        self.visit_precondition_expr(&mut goal, &problem.goal);
         if let CompilerContext::Problem { memory_map, actions } = std::mem::take(&mut self.context) {
             println!("Memory map: {:?}", memory_map);
-            Ok(CompiledProblem { memory_size:memory_map.len(), actions, init: Vec::new(), goal: Vec::new() })
+            Ok(CompiledProblem { memory_size:memory_map.len(), actions, init, goal})
         } else {
             todo!("Create error here.")
         }
+    }
+
+    fn visit_init(&self, init:&[Init]) -> Vec<Instruction> {
+        let mut result = Vec::new();
+        for i in init {
+            match i {
+                Init::AtomicFormula(name, params) => result.push(self.predicate(false, name, params)), 
+                Init::NotAtomicFormula(_, _) => todo!(),
+                Init::At(_, _) => todo!(),
+                Init::NotAt(_, _) => todo!(),
+                Init::Equals(_, _) => todo!(),
+                Init::Is(_, _) => todo!(),
+            }
+        }
+        result
     }
 
     /// Replace Predicate(n, params) instructions with read/writing states at offsets
@@ -215,7 +252,7 @@ impl<'a> Compiler {
     /// If a predicate uses one parameter - then it will crate as many actions as there are objects of that parameter type
     /// but if a predicate uses more than one parameter it will create (n choose k) actions, where n is count of objects that match 
     /// types, and k is parameter count. This is the same case for one parameter, but (n choose 1) == n
-    fn create_permutated_actions(&mut self, objects:&Vec<usize>, parameter_objects:&[usize], parameter_index: usize, action_index: usize) {
+    fn create_permutated_actions(&mut self, parameter_objects:&[usize], parameter_index: usize, action_index: usize) {
         let action = self.actions.get(action_index).unwrap();
         // action.parameters.len() is k
         if parameter_index == action.parameter_types.len() {
@@ -230,11 +267,16 @@ impl<'a> Compiler {
             let param_type = *action.parameter_types.get(parameter_index).unwrap();
             // this loop iterates n times
             let mut parameter_objects = parameter_objects.to_vec();
-            parameter_objects.push(0);
-            for object_pos in objects.iter().enumerate().filter_map(|(pos, kind)| if (*kind) as u16 == param_type { Some(pos) } else { None }) {
+            // Need to allocate new vector to avoid mutable borrow checker complaining.
+            let action_objects:Vec<usize> = self.objects.iter().enumerate().filter_map(|(pos, kind)| if (*kind) as u16 == param_type { Some(pos) } else { None }).collect();
+            for object_pos in action_objects {
                 if parameter_objects.iter().find(|t| **t == object_pos).is_none() {
-                    parameter_objects[parameter_index] = object_pos;
-                    self.create_permutated_actions(objects, &parameter_objects, parameter_index+1, action_index);
+                    if parameter_objects.len() == parameter_index {
+                        parameter_objects.push(object_pos);
+                    } else {
+                        parameter_objects[parameter_index] = object_pos;
+                    }
+                    self.create_permutated_actions(&parameter_objects, parameter_index+1, action_index);
                 }
             }
         }
@@ -303,24 +345,40 @@ impl<'a> Compiler {
     }
 
     /// Convert predicate AST to [Instruction]
-    fn predicate(&mut self, is_read:bool, name:&str, params:&Vec<Term>) -> Instruction {
+    fn predicate(&self, is_read:bool, name:&str, params:&Vec<Term>) -> Instruction {
         let id = *self.predicates_map.get(name).unwrap() as u16;
         let mut vars = Vec::new();
-        for param in params {
-            match param {
-                Term::Name(_) => todo!(),
-                Term::Function(_) => todo!(),
-                Term::Variable(var) => match &self.context {
-                    CompilerContext::None => todo!(),
-                    CompilerContext::Problem { .. } => panic!("Unexpected compiler context while building predicates."),
-                    CompilerContext::Action { parameters_map } => vars.push(*parameters_map.get(*var).unwrap() as u16),
-                },
-            }
-        }
-        if is_read {
-            Instruction::ReadPredicate(id, vars)
-        } else {
-            Instruction::SetPredicate(id, vars)
+        match &self.context {
+            CompilerContext::None => todo!(),
+            CompilerContext::Action { parameters_map } => {
+                for param in params {
+                    match param {
+                        Term::Name(_) => panic!("Unexpected name inside action context while building predicates."),
+                        Term::Variable(var) => vars.push(*parameters_map.get(*var).unwrap() as u16),
+                        Term::Function(_) => todo!(),
+                    }
+                }
+                if is_read {
+                    Instruction::ReadPredicate(id, vars)
+                } else {
+                    Instruction::SetPredicate(id, vars)
+                }
+            },
+            CompilerContext::Problem { memory_map, ..} => {
+                let mut  map_vector = vec![id];
+                for param in params {
+                    match param {
+                        Term::Name(n) => map_vector.push(*self.object_map.get(*n).unwrap() as u16),
+                        Term::Variable(_) => panic!("Unexpected variable inside problem context while building predicates."),
+                        Term::Function(_) => todo!(),
+                    }
+                }
+                if is_read {
+                    Instruction::ReadState(*memory_map.get(&map_vector).unwrap())
+                } else {
+                    Instruction::SetState(*memory_map.get(&map_vector).unwrap())
+                }
+            },
         }
     }
 
@@ -446,7 +504,7 @@ impl<'a> Compiler {
 pub mod tests {
     use std::{fs, collections::HashMap};
 
-    use crate::{parser::{Parser, ast::Requirements}, compiler::{CompilerContext, IntermediateAction, Instruction}};
+    use crate::{parser::{Parser, ast::Requirements}, compiler::{CompilerContext, IntermediateAction, Instruction, CompiledProblem, CompiledAction}};
 
     use super::Compiler;
 
@@ -497,6 +555,59 @@ pub mod tests {
                 precondition: vec![Instruction::ReadPredicate(0, vec![0]), Instruction::ReadPredicate(2, vec![1]), Instruction::And(2)], 
                 effect: vec![Instruction::Not, Instruction::SetPredicate(0, vec![0]), Instruction::Not, Instruction::SetPredicate(2, vec![1]), Instruction::SetPredicate(1, vec![1, 0])] }], 
             action_map: HashMap::from_iter(vec![(String::from("grasp"), 0)]), 
-            function_map: HashMap::new() }, compiler);
+            function_map: HashMap::new(),
+            object_map: HashMap::new(),
+            objects: Vec::new() }, compiler);
+    }
+
+    #[test]
+    fn test_problem() {
+        let mut parser = Parser::new("(define (domain barman) (:requirements :strips :typing) 
+        (:types container hand beverage - object) 
+        (:predicates (ontable ?c - container) (holding ?h - hand ?c - container) (handempty ?h - hand))
+        (:action grasp :parameters (?c - container ?h - hand) 
+            :precondition (and (ontable ?c) (handempty ?h)) 
+            :effect (and (not (ontable ?c)) (not (handempty ?h)) (holding ?h ?c))
+        ))", None);
+        let domain = parser.next().unwrap().unwrap().unwrap_domain();
+        let mut compiler = match Compiler::new(domain) {
+            Ok(c) => c,
+            Err(e) => { println!("{}", e); return; },
+        };
+        let mut parser = Parser::new("(define (problem prob) (:domain barman) 
+        (:objects container1 - container hand1 hand2 - hand shot1 shot2 - beverage)
+        (:init (ontable container1)) (:goal (holding hand1 container1)))", None);
+        let problem = parser.next().unwrap().unwrap().unwrap_problem();
+        let problem = match compiler.compile_problem(&problem) {
+            Ok(p) => p,
+            Err(e) => { println!("{}", e); return; },
+        };
+        assert_eq!(CompiledProblem{ 
+            memory_size: 5, 
+            actions: vec![
+                CompiledAction{precondition:vec![
+                    Instruction::ReadState(0),
+                    Instruction::ReadState(1),
+                    Instruction::And(2)
+                ], effect:vec![
+                    Instruction::Not,
+                    Instruction::SetState(0),
+                    Instruction::Not,
+                    Instruction::SetState(1),
+                    Instruction::SetState(2)
+                ]},
+                CompiledAction{precondition:vec![
+                    Instruction::ReadState(0),
+                    Instruction::ReadState(3),
+                    Instruction::And(2),
+                ], effect:vec![
+                    Instruction::Not,
+                    Instruction::SetState(0),
+                    Instruction::Not,
+                    Instruction::SetState(3),
+                    Instruction::SetState(4)
+                ]}], 
+            init: vec![Instruction::SetState(0)], 
+            goal: vec![Instruction::ReadState(2)] }, problem);
     }
 }
