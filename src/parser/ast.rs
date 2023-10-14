@@ -1,63 +1,73 @@
+use std::{str::FromStr, ops::Range};
+
 use enumset::{EnumSet, EnumSetType};
 
-use super::tokens::Literal;
-
-#[derive(PartialEq, Debug)]
-pub enum Stmt<'a> {
-    Domain(Domain<'a>),
-    Problem(Problem<'a>)
+pub trait SpannedAst {
+    fn range(&self) -> Range<usize>;
 }
 
-impl<'a> Stmt<'a> {
-    pub fn unwrap_domain(self) -> Domain<'a> {
-        match self {
-            Self::Domain(d) => d,
-            _ => panic!(),
-        }
+pub trait SpannedAstMut:SpannedAst {
+    fn range_mut(&mut self) -> &mut Range<usize>;
+}
+impl<O> SpannedAst for Spanned<O> {
+    #[inline]
+    fn range(&self) -> Range<usize> {
+        self.0.clone()
     }
-
-    pub fn unwrap_problem(self) -> Problem<'a> {
-        match self {
-            Self::Problem(p) => p,
-            _ => panic!(),
-        }
+}
+impl<O> SpannedAstMut for Spanned<O> {
+    #[inline]
+    fn range_mut(&mut self) -> &mut Range<usize> {
+        &mut self.0
     }
 }
 
-#[derive(PartialEq, Debug)]
-pub struct Problem<'a> {
-    pub name: &'a str,
-    pub domain: &'a str,
-    pub requirements: EnumSet<Requirements>,
-    pub objects: Vec<List<'a>>,
-    pub init: Vec<Init<'a>>,
-    pub goal: PreconditionExpr<'a>,
-    pub constraints: Option<PrefConstraintGD<'a>>,
-    pub metric: Option<Metric<'a>>,
-    pub length: Option<LengthSpecification<'a>>
-}
+pub type Spanned<O> = (Range<usize>, O);
+pub type Name<'src> = Spanned<&'src str>;
 
-#[derive(PartialEq, Debug)]
-pub struct LengthSpecification<'a> {
-    serial: Option<Literal<'a>>,
-    parallel: Option<Literal<'a>>
+impl<O> SpannedAst for Vec<O> where O:SpannedAst{
+    fn range(&self) -> Range<usize> {
+        let start = self.first().and_then(|r| Some(r.range().start)).unwrap_or(0);
+        let end = self.last().and_then(|r| Some(r.range().end)).unwrap_or(start);
+        Range{start, end}
+    }
 }
 
 
 #[derive(PartialEq, Debug)]
-pub struct Domain<'a> {
-    pub name: &'a str,
-    pub requirements: EnumSet<Requirements>,
-    pub types: Vec<List<'a>>,
-    pub constants: Vec<List<'a>>,
-    pub predicates: Vec<AtomicFSkeleton<'a>>,
-    pub functions: Vec<TypedFunction<'a>>,
-    pub constraints: Option<ConstraintGD<'a>>,
-    pub actions: Vec<Action<'a>>,
+pub struct Problem<'src> {
+    pub name: Name<'src>,
+    pub domain: Name<'src>,
+    pub requirements: EnumSet<Requirement>,
+    pub objects: Vec<List<'src>>,
+    pub init: Vec<Init<'src>>,
+    pub goal: PreconditionExpr<'src>,
+    pub constraints: Option<PrefConstraintGD<'src>>,
+    pub metric: Option<Metric<'src>>,
+    // pub length: Option<LengthSpecification>, // deprecated since PDDL 2.1
+}
+
+#[derive(PartialEq, Debug)]
+pub struct LengthSpecification {
+    serial: Option<i64>,
+    parallel: Option<i64>
+}
+
+
+#[derive(PartialEq, Debug)]
+pub struct Domain<'src> {
+    pub name: Name<'src>,
+    pub requirements: EnumSet<Requirement>,
+    pub types: Vec<List<'src>>,
+    pub constants: Vec<List<'src>>,
+    pub predicates: Vec<AtomicFSkeleton<'src>>,
+    pub functions: Vec<FunctionTypedList<'src>>,
+    pub constraints: Option<ConstraintGD<'src>>,
+    pub actions: Vec<Action<'src>>,
 }
 
 #[derive(EnumSetType, Debug)]
-pub enum Requirements {
+pub enum Requirement {
     /// Basic STRIPS-style adds and deletes
     Strips,
     /// Allow type names in declarations of variables
@@ -127,195 +137,214 @@ pub enum Requirements {
     ActionCosts,
 }
 
-impl std::fmt::Display for Requirements {
+impl std::fmt::Display for Requirement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Requirements::Strips => write!(f, ":strips"),
-            Requirements::Typing => write!(f, ":typing"),
-            Requirements::NegativePreconditions => write!(f, ":negative-preconditions"),
-            Requirements::DisjunctivePreconditions => write!(f, ":disjunctive-preconditions"),
-            Requirements::Equality => write!(f, ":equality"),
-            Requirements::ExistentialPreconditions => write!(f, ":existential-preconditions"),
-            Requirements::UniversalPreconditions => write!(f, ":universal-preconditions"),
-            Requirements::ConditionalEffects => write!(f, ":conditional-effects"),
-            Requirements::ObjectFluents => write!(f, ":fluents"),
-            Requirements::NumericFluents => write!(f, ":numeric-fluents"),
-            Requirements::DurativeActions => write!(f, ":durative-actions"),
-            Requirements::DurationInequalities => write!(f, ":duration-inequalities"),
-            Requirements::ContinuousEffects => write!(f, ":continuous-effects"),
-            Requirements::DerivedPredicates => write!(f, ":derived-predicates"),
-            Requirements::TimedInitialLiterals => write!(f, ":timed-initial-literals"),
-            Requirements::Preferences => write!(f, ":preferences"),
-            Requirements::Constraints => write!(f, ":constraints"),
-            Requirements::ActionCosts => write!(f, ":action-costs"),
+            Requirement::Strips => write!(f, ":strips"),
+            Requirement::Typing => write!(f, ":typing"),
+            Requirement::NegativePreconditions => write!(f, ":negative-preconditions"),
+            Requirement::DisjunctivePreconditions => write!(f, ":disjunctive-preconditions"),
+            Requirement::Equality => write!(f, ":equality"),
+            Requirement::ExistentialPreconditions => write!(f, ":existential-preconditions"),
+            Requirement::UniversalPreconditions => write!(f, ":universal-preconditions"),
+            Requirement::ConditionalEffects => write!(f, ":conditional-effects"),
+            Requirement::ObjectFluents => write!(f, ":fluents"),
+            Requirement::NumericFluents => write!(f, ":numeric-fluents"),
+            Requirement::DurativeActions => write!(f, ":durative-actions"),
+            Requirement::DurationInequalities => write!(f, ":duration-inequalities"),
+            Requirement::ContinuousEffects => write!(f, ":continuous-effects"),
+            Requirement::DerivedPredicates => write!(f, ":derived-predicates"),
+            Requirement::TimedInitialLiterals => write!(f, ":timed-initial-literals"),
+            Requirement::Preferences => write!(f, ":preferences"),
+            Requirement::Constraints => write!(f, ":constraints"),
+            Requirement::ActionCosts => write!(f, ":action-costs"),
         }
     }
 }
 
 #[derive(PartialEq, Debug)]
-pub enum PreconditionExpr<'a> {
-    And(Vec<PreconditionExpr<'a>>),
-    Forall(Vec<List<'a>>, Box<PreconditionExpr<'a>>), // :universal−preconditions or // :conditional−effects
-    Preference(Option<&'a str>, GD<'a>), // :preferences
-    GD(GD<'a>)
+pub struct Forall<'src, T> {
+    pub variables: Vec<List<'src>>,
+    pub gd: Box<T>
 }
 
 #[derive(PartialEq, Debug)]
-pub enum GD<'a> {
-    AtomicFormula(&'a str, Vec<Term<'a>>),
-    AtomicEquality(Term<'a>, Term<'a>), // :equality
-    NotAtomicFormula(&'a str, Vec<Term<'a>>), // :negative−preconditions
-    NotAtomicEquality(Term<'a>, Term<'a>), // :equality AND :negative−preconditions
-    And(Vec<GD<'a>>), // not(and(f1, f2, f2)) is legal, but not(and(Preference, Preference, Preference)) is not, 
+pub struct When<T, P> {
+    pub gd: T,
+    pub effect: Box<P>
+}
+
+#[derive(PartialEq, Debug)]
+pub struct Preference<'src, T> {
+    pub name: Option<Name<'src>>,
+    pub gd: T
+}
+
+pub type Exists<'src, T> = Forall<'src, T>;
+
+
+#[derive(PartialEq, Debug)]
+pub enum PreconditionExpr<'src> {
+    And(Vec<PreconditionExpr<'src>>),
+    Forall(Forall<'src, Self>), // :universal−preconditions or // :conditional−effects
+    Preference(Preference<'src, GD<'src>>), // :preferences
+    GD(GD<'src>),
+}
+
+#[derive(PartialEq, Debug)]
+pub enum GD<'src> {
+    AtomicFormula(AtomicFormula<'src, Term<'src>>),
+    And(Vec<GD<'src>>), // not(and(f1, f2, f2)) is legal, but not(and(Preference, Preference, Preference)) is not, 
                       // however and(Preference, Preference, Preference) is legal. That's why GD has And too.
-    Or(Vec<GD<'a>>), //:disjunctive−preconditions
-    Not(Box<GD<'a>>), // :disjunctive−preconditions
-    Imply(Box<(GD<'a>, GD<'a>)>), // :disjunctive−preconditions
-    Exists(Vec<List<'a>>, Box<GD<'a>>), // :existential−preconditions
-    Forall(Vec<List<'a>>, Box<GD<'a>>), // :universal−preconditions
+    Or(Vec<GD<'src>>), //:disjunctive−preconditions
+    Not(Box<GD<'src>>), // :disjunctive−preconditions
+    Imply(Box<(GD<'src>, GD<'src>)>), // :disjunctive−preconditions
+    Exists(Exists<'src, Self>), // :existential−preconditions
+    Forall(Forall<'src, Self>), // :universal−preconditions
     
-    LessThan(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
-    LessThanOrEqual(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
-    Equal(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
-    GreatherThanOrEqual(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
-    GreaterThan(FluentExpression<'a>, FluentExpression<'a>), // :numeric-fluents
+    LessThan(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
+    LessThanOrEqual(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
+    Equal(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
+    GreatherThanOrEqual(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
+    GreaterThan(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
+
 }
 
 #[derive(PartialEq, Debug)]
-pub enum FluentExpression<'a> {
-    Number(Literal<'a>), // :numeric-fluents
-    Subtract(Box<(FluentExpression<'a>, FluentExpression<'a>)>), // :numeric-fluents
-    Divide(Box<(FluentExpression<'a>, FluentExpression<'a>)>), // :numeric-fluents
-    Add(Vec<FluentExpression<'a>>), // :numeric-fluents
-    Multiply(Vec<FluentExpression<'a>>), // :numeric-fluents
-    Function(FunctionTerm<'a>), // :numeric-fluents
+pub enum FluentExpression<'src> {
+    Number(i64), // :numeric-fluents
+    Subtract(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
+    Negate(Box<Spanned<Self>>),
+    Divide(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
+    Add(Vec<Spanned<Self>>), // :numeric-fluents
+    Multiply(Vec<Spanned<Self>>), // :numeric-fluents
+    Function(FunctionTerm<'src>), // :numeric-fluents
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Effect<'a> {
-    And(Vec<Effect<'a>>),
-    Forall(Vec<List<'a>>, Box<Effect<'a>>), // :conditional−effects
-    When(GD<'a>, Vec<Effect<'a>>), // :conditional−effects
-    AtomicFormula(&'a str, Vec<Term<'a>>),
-    NotAtomicFormula(&'a str, Vec<Term<'a>>),
-    Assign(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
-    AssignUndefined(FunctionTerm<'a>), // :object-fluents
-    ScaleUp(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
-    ScaleDown(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
-    Increase(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
-    Decrease(FunctionTerm<'a>, FluentExpression<'a>), // :numeric-fluents
+pub enum Effect<'src> {
+    And(Vec<Self>),
+    Forall(Forall<'src, Self>), // :conditional−effects
+    When(When<GD<'src>, Self>), // :conditional−effects
+    NegativeFormula(NegativeFormula<'src, Term<'src>>),
+    Assign(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
+    AssignTerm(FunctionTerm<'src>, Term<'src>),
+    AssignUndefined(FunctionTerm<'src>), // :object-fluents
+    ScaleUp(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
+    ScaleDown(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
+    Increase(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
+    Decrease(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
 }
 
 #[derive(PartialEq, Debug)]
-pub enum DurationConstraint<'a> {
-    And(Vec<DurationConstraint<'a>>), // :duration−inequalities
-    AtStart(Box<DurationConstraint<'a>>), 
-    AtEnd(Box<DurationConstraint<'a>>),
-    GreaterOrEquals(FluentExpression<'a>), // :duration−inequalities
-    LessThanOrEquals(FluentExpression<'a>), // :duration−inequalities
-    Equals(FluentExpression<'a>),
+pub enum DurationConstraint<'src> {
+    None,
+    And(Vec<Self>), // :duration−inequalities
+    AtStart(Box<Self>), 
+    AtEnd(Box<Self>),
+    GreaterOrEquals(Spanned<FluentExpression<'src>>), // :duration−inequalities
+    LessThanOrEquals(Spanned<FluentExpression<'src>>), // :duration−inequalities
+    Equals(Spanned<FluentExpression<'src>>),
 }
 
 #[derive(PartialEq, Debug)]
-pub enum DurationGD<'a> {
-    And(Vec<DurationGD<'a>>),
-    Forall(Vec<List<'a>>, Box<DurationGD<'a>>), // :universal−preconditions
-    Preference(Option<&'a str>, TimedGD<'a>), // :preferences
-    GD(TimedGD<'a>)
+pub enum DurationGD<'src> {
+    And(Vec<Self>),
+    Forall(Forall<'src, Self>), // :universal−preconditions
+    Preference(Preference<'src, TimedGD<'src>>), // :preferences
+    GD(TimedGD<'src>),
 }
 
 #[derive(PartialEq, Debug)]
-pub enum DurationEffect<'a> {
-    And(Vec<DurationEffect<'a>>),
-    Forall(Vec<List<'a>>, Box<DurationEffect<'a>>), // :universal−preconditions
-    When(DurationGD<'a>, TimedEffect<'a>), // :conditional−effects
-    GD(TimedEffect<'a>),
+pub enum DurationEffect<'src> {
+    And(Vec<Self>),
+    Forall(Forall<'src, Self>), // :universal−preconditions
+    When(When<DurationGD<'src>, TimedEffect<'src>>), // :conditional−effects
+    GD(TimedEffect<'src>),
 }
 
 #[derive(PartialEq, Debug)]
-pub enum PrefConstraintGD<'a> {
-    And(Vec<PrefConstraintGD<'a>>),
-    Forall(Vec<List<'a>>, Box<PrefConstraintGD<'a>>), // :universal−preconditions
-    Preference(&'a str, ConstraintGD<'a>), // :preferences
-    GD(ConstraintGD<'a>)
+pub enum PrefConstraintGD<'src> {
+    And(Vec<Self>),
+    Forall(Forall<'src, Self>), // :universal−preconditions
+    Preference(Preference<'src, ConstraintGD<'src>>), // :preferences
+    GD(ConstraintGD<'src>),
 }
 
 #[derive(PartialEq, Debug)]
-pub enum ConstraintGD<'a> {
-    And(Vec<ConstraintGD<'a>>),
-    Forall(Vec<List<'a>>, Box<ConstraintGD<'a>>),
-    AtEnd(GD<'a>),
-    Always(GD<'a>),
-    Sometime(GD<'a>),
-    Within(Literal<'a>, GD<'a>),
-    AtMostOnce(GD<'a>),
-    SometimeAfter(GD<'a>, GD<'a>),
-    SometimeBefore(GD<'a>, GD<'a>),
-    AlwaysWithin(Literal<'a>, GD<'a>, GD<'a>),
-    HoldDuring(Literal<'a>, Literal<'a>, GD<'a>),
-    HoldAfter(Literal<'a>, GD<'a>)
+pub enum ConstraintGD<'src> {
+    And(Vec<Self>),
+    Forall(Forall<'src, Self>),
+    AtEnd(GD<'src>),
+    Always(GD<'src>),
+    Sometime(GD<'src>),
+    Within(i64, GD<'src>),
+    AtMostOnce(GD<'src>),
+    SometimeAfter(GD<'src>, GD<'src>),
+    SometimeBefore(GD<'src>, GD<'src>),
+    AlwaysWithin(i64, GD<'src>, GD<'src>),
+    HoldDuring(i64, i64, GD<'src>),
+    HoldAfter(i64, GD<'src>),
 }
 
 
 #[derive(PartialEq, Debug)]
-pub enum TimedEffect<'a> {
-    AtStart(Effect<'a>),
-    AtEnd(Effect<'a>),
-    Effect(Effect<'a>)
+pub enum TimedEffect<'src> {
+    AtStart(Effect<'src>),
+    AtEnd(Effect<'src>),
+    Effect(Effect<'src>)
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Init<'a> {
-    AtomicFormula(&'a str, Vec<Term<'a>>),
-    NotAtomicFormula(&'a str, Vec<Term<'a>>), // :negative−preconditions
-    At(Literal<'a>, Vec<Term<'a>>), // :timed−initial−literals
-    NotAt(Literal<'a>, Vec<Term<'a>>), // :timed−initial−literals
-    Equals(FunctionTerm<'a>, Literal<'a>), // :numeric-fluents
-    Is(FunctionTerm<'a>, Term<'a>), // :object-fluents
+pub enum Init<'src> {
+    AtomicFormula(NegativeFormula<'src, Name<'src>>),
+    At(i64, NegativeFormula<'src, Name<'src>>), // :timed−initial−literals
+    Equals(FunctionTerm<'src>, i64), // :numeric-fluents
+    Is(FunctionTerm<'src>, Name<'src>), // :object-fluents
 }
 
 #[derive(PartialEq, Debug)]
-pub enum TimedGD<'a> {
-    AtStart(GD<'a>),
-    AtEnd(GD<'a>),
-    OverAll(GD<'a>)
+pub enum TimedGD<'src> {
+    AtStart(GD<'src>),
+    AtEnd(GD<'src>),
+    OverAll(GD<'src>),
 }
 
 #[derive(PartialEq, Debug)]
-pub enum MetricFluentExpr<'a> {
-    FExpr(FluentExpression<'a>),
+pub enum MetricFluentExpr<'src> {
+    FExpr(Spanned<FluentExpression<'src>>),
     TotalTime(),
-    IsViolated(&'a str)
+    IsViolated(Name<'src>),
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Metric<'a> {
-    Minimize(MetricFluentExpr<'a>),
-    Maximize(MetricFluentExpr<'a>)
+pub enum Metric<'src> {
+    Minimize(MetricFluentExpr<'src>),
+    Maximize(MetricFluentExpr<'src>),
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Action<'a> {
-    Basic(BasicAction<'a>),
-    Durative(DurativeAction<'a>), // :durative−actions
-    Derived(AtomicFSkeleton<'a>, GD<'a>) // :derived−predicates
+pub enum Action<'src> {
+    Basic(BasicAction<'src>),
+    Durative(DurativeAction<'src>), // :durative−actions
+    Derived(AtomicFSkeleton<'src>, GD<'src>), // :derived−predicates
 }
 
 #[derive(PartialEq, Debug)]
-pub struct BasicAction<'a> {
-    pub name:&'a str, 
-    pub parameters: Vec<List<'a>>, 
-    pub precondition:Option<PreconditionExpr<'a>>, 
-    pub effect:Option<Effect<'a>>
+pub struct BasicAction<'src> {
+    pub name:Name<'src>, 
+    pub parameters: Vec<List<'src>>, 
+    pub precondition:Option<PreconditionExpr<'src>>, 
+    pub effect:Option<Effect<'src>>
 }
 
 #[derive(PartialEq, Debug)]
-pub struct DurativeAction<'a> {
-    pub name:&'a str, 
-    pub parameters: Vec<List<'a>>, 
-    pub duration: DurationConstraint<'a>,
-    pub condition: Option<DurationGD<'a>>, 
-    pub effect:Option<DurationEffect<'a>>
+pub struct DurativeAction<'src> {
+    pub name:Name<'src>, 
+    pub parameters: Vec<List<'src>>, 
+    pub duration: DurationConstraint<'src>,
+    pub condition: Option<DurationGD<'src>>, 
+    pub effect:Option<DurationEffect<'src>>
 }
 
 /// Structure used for both Predicates and Functions
@@ -332,40 +361,71 @@ pub struct DurativeAction<'a> {
 /// ```
 /// So they are really the same, just used differently.
 #[derive(PartialEq, Debug)]
-pub struct AtomicFSkeleton<'a> {
-    pub name: &'a str,
-    pub variables: Vec<List<'a>>
+pub struct AtomicFSkeleton<'src> {
+    pub name: Name<'src>,
+    pub variables: Vec<List<'src>>
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Type<'src> {
+    None,
+    Either(Vec<Name<'src>>),
+    Exact(Name<'src>)
 }
 
 
 /// [`FunctionTypeKind::Numeric`] if `:numeric-fluents` is set.
 #[derive(PartialEq, Debug)]
-pub enum FunctionTypeKind<'a> {
+pub enum FunctionType<'src> {
     None,
-    Numeric(i64),
-    Typed(Vec<&'a str>)
+    Numeric(Spanned<i64>),
+    Typed(Type<'src>)
 }
 
 #[derive(PartialEq, Debug)]
-pub struct TypedFunction<'a> {
-    pub function: AtomicFSkeleton<'a>,
-    pub kind: FunctionTypeKind<'a>
+pub struct FunctionTypedList<'src> {
+    pub functions: Vec<AtomicFSkeleton<'src>>,
+    pub kind: FunctionType<'src>
 }
 
 #[derive(PartialEq, Debug)]
-pub enum List<'a> {
-    Basic(Vec<&'a str>),
-    Typed(Vec<&'a str>, &'a str),
+pub struct List<'src> {
+    pub items: Vec<Name<'src>>,
+    pub kind: Type<'src>,
 }
 
 #[derive(PartialEq, Debug)]
-pub struct FunctionTerm<'a> {
-    pub name:&'a str,
-    pub terms: Vec<Term<'a>>
+pub enum AtomicFormula<'src, T> {
+    Predicate(Name<'src>, Vec<T>),
+    Equality(T, T)
+}
+
+#[derive(PartialEq, Debug)]
+pub enum NegativeFormula<'src, T> {
+    Direct(AtomicFormula<'src, T>),
+    Not(AtomicFormula<'src, T>)
+}
+
+
+#[derive(PartialEq, Debug)]
+pub struct FunctionTerm<'src> {
+    pub span:Range<usize>,
+    pub name:Name<'src>,
+    pub terms:Vec<Term<'src>>
 }
 #[derive(PartialEq, Debug)]
-pub enum Term<'a> {
-    Name(&'a str),
-    Variable(&'a str),
-    Function(FunctionTerm<'a>) // :object-fluents
+pub enum Term<'src> {
+    Name(Name<'src>),
+    Variable(Name<'src>),
+    Function(FunctionTerm<'src>) // :object-fluents
+}
+
+impl<'src> SpannedAst for Term<'src> {
+    fn range(&self) -> Range<usize> {
+        match self {
+            Self::Name(n) => n.0.clone(),
+            Self::Variable(v) => v.0.clone(),
+            Self::Function(f) => f.span.clone()
+        }
+    }
 }

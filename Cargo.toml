@@ -10,3 +10,5 @@ name = "pddl_rs"
 
 [dependencies]
 enumset = "1.0.12"
+ariadne = "0.3.0"
+nom = "7.1.3"
