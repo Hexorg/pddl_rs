@@ -162,6 +162,7 @@ impl std::fmt::Display for Requirement {
     }
 }
 
+
 #[derive(PartialEq, Debug)]
 pub struct Forall<'src, T> {
     pub variables: Vec<List<'src>>,

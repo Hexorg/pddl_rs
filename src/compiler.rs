@@ -2,7 +2,7 @@ use std::{collections::{HashMap}, hash::Hash};
 
 use enumset::EnumSet;
 
-use crate::parser::{Error, ast::*};
+use crate::parser::{ast::*};
 
 #[derive(Debug, PartialEq)]
 enum Instruction {
