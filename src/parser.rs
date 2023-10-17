@@ -1,8 +1,11 @@
 pub mod ast;
 pub mod input;
 
+use crate::{Error, ErrorKind};
+
 use self::{input::Input, ast::ConstraintGD};
-use enumset::EnumSet;
+use enumset::{EnumSet, enum_set};
+use ast::Requirement::*;
 
 use ast::*;
 
@@ -15,53 +18,6 @@ use nom::{self,
     branch::alt, 
     multi::{many0, fold_many1}, bytes::complete::is_not, InputLength};
 
-use ariadne::{Label, Report, ReportKind};
-use std::ops::Range;
-
-
-#[derive(PartialEq, Clone, Copy, Debug)]
-enum ErrorKind<'src> {
-    Nom(nom::error::ErrorKind),
-    UnsetRequirement(EnumSet<Requirement>),
-    Tag(&'src str),
-    Many1(&'static str),
-    FunctionType,
-    Name,
-    Variable,
-    Parenthesis,
-    UnclosedParenthesis,
-    TypedList,
-    PreconditionExpression,
-    Effect,
-    FluentExpression,
-    GD, 
-    Term, 
-    FunctionTypedList,
-}
-
-#[derive(PartialEq, Clone, Debug)]
-pub struct Error<'src> {
-    input:&'src str,
-    kind:ErrorKind<'src>,
-    chain:Option<Box<Self>>,
-    range: Range<usize>,
-}
-
-impl<'src> nom::error::ParseError<Input<'src>> for Error<'src> {
-    fn from_error_kind(input: Input<'src>, kind: nom::error::ErrorKind) -> Self {
-        Self{input:input.src, kind:ErrorKind::Nom(kind), chain:None, range:input.range()}
-    }
-
-    fn append(input: Input<'src>, kind: nom::error::ErrorKind, other: Self) -> Self {
-        Self{input:input.src, kind:ErrorKind::Nom(kind), chain:Some(Box::new(other)), range:input.range()}
-    }
-}
-
-impl<'src> Error<'src> {
-    pub fn unset_requirement(input:Input<'src>, requirements:EnumSet<Requirement>) -> Self {
-        Self{input:input.src, kind:ErrorKind::UnsetRequirement(requirements), chain:None, range:input.range()}
-    }
-}
 
 
 type IResult<'src, O> = nom::IResult<Input<'src>, O, Error<'src>>;
@@ -69,13 +25,13 @@ type IResult<'src, O> = nom::IResult<Input<'src>, O, Error<'src>>;
 fn err_name<'src>(ek: ErrorKind<'src>) -> impl FnMut(nom::Err<Error<'src>>) -> nom::Err<Error<'src>> {
     move |e| 
         e.map(|Error{input, chain, mut range, mut kind}| {
+            let input = input.unwrap();
             let len = match ek {
                 ErrorKind::Nom(_) => todo!(),
                 ErrorKind::UnsetRequirement(_) => todo!(),
                 ErrorKind::Name |
                 ErrorKind::Variable |
                 ErrorKind::Term |
-                ErrorKind::TypedList |
                 ErrorKind::FunctionType |
                 ErrorKind::GD |
                 ErrorKind::PreconditionExpression |
@@ -86,27 +42,29 @@ fn err_name<'src>(ek: ErrorKind<'src>) -> impl FnMut(nom::Err<Error<'src>>) -> n
                 ErrorKind::Many1(_) |
                 ErrorKind::UnclosedParenthesis|
                 ErrorKind::Parenthesis => 1,
+                // Compiler errors:
+                ErrorKind::MissmatchedDomain(_) => panic!(),
             };
             if let ErrorKind::Nom(_) = kind {
-                range = Range{start:range.start, end:range.start+len};
+                range = range.start..(range.start+len);
                 kind = ek;
             }
-            Error{chain, input, kind, range}
+            Error{chain, input:Some(input), kind, range}
     })
 }
 
-pub fn check_requirements<'src, O, F>(mut parser:F, required:EnumSet<Requirement>) -> impl FnMut(Input<'src>) -> IResult<O> 
+pub fn check_requirements<'src, O, F>(mut parser:F, required:EnumSet<Requirement>, or:EnumSet<Requirement>) -> impl FnMut(Input<'src>) -> IResult<O> 
     where 
     O: 'src,
     F: Parser<Input<'src>, O, Error<'src>> {
         move |input: Input<'src>| {
             let (i, o) = parser.parse(input.clone())?;
-            if !i.requirements.is_superset(required) {
+            if !(i.requirements.is_superset(required) ||(!or.is_empty() && i.requirements.is_superset(or))) {
                 Err(nom::Err::Failure(Error{
-                    input:input.src, 
+                    input:Some(input.src), 
                     kind: ErrorKind::UnsetRequirement(required), 
                     chain:None, 
-                    range: Range{start:input.input_pos, end:i.input_pos} 
+                    range: input.input_pos..i.input_pos
                 })) 
             } else {
                 Ok((i, o))
@@ -114,40 +72,26 @@ pub fn check_requirements<'src, O, F>(mut parser:F, required:EnumSet<Requirement
         }
 }
 
-impl<'src> Error<'src> {
-    fn make_label(&self, filename:&'static str) -> Label<(&'src str, Range<usize>)> {
-        let label = Label::new((filename, self.range.clone()));
-        match self.kind {
-            ErrorKind::Nom(_) => todo!(),
-            ErrorKind::UnsetRequirement(r) => label.with_message(format!("Unset requirements {}.", r.into_iter().map(|x| x.to_string()).collect::<Vec<String>>().join(", "))),
-            ErrorKind::Tag(name) => label.with_message(format!("Expected keyword {}.", name)),
-            ErrorKind::Many1(name) => label.with_message(format!("Expected one or more {}.", name)),
-            ErrorKind::FunctionType => todo!(),
-            ErrorKind::Name => todo!(),
-            ErrorKind::Variable => todo!(),
-            ErrorKind::Parenthesis => label.with_message("Expected '('."),
-            ErrorKind::UnclosedParenthesis => label.with_message("Expected ')'."),
-            ErrorKind::TypedList => todo!(),
-            ErrorKind::PreconditionExpression => label.with_message("Expected precondition expression."),
-            ErrorKind::Effect => todo!(),
-            ErrorKind::FluentExpression => todo!(),
-            ErrorKind::GD => label.with_message("Expected GD."),
-            ErrorKind::Term => label.with_message("Expected name, variable, or function term if :object-fluents is set."),
-            ErrorKind::FunctionTypedList => todo!(),
+pub fn alt_check_requirements<'src, O, F>(mut parser:F, required:EnumSet<Requirement>, or:EnumSet<Requirement>) -> impl FnMut(Input<'src>) -> IResult<O> 
+    where 
+    O: 'src,
+    F: Parser<Input<'src>, O, Error<'src>> {
+        move |input: Input<'src>| {
+            let (i, o) = parser.parse(input.clone())?;
+            if !(i.requirements.is_superset(required) ||(!or.is_empty() && i.requirements.is_superset(or))) {
+                Err(nom::Err::Error(Error{
+                    input:Some(input.src), 
+                    kind: ErrorKind::UnsetRequirement(required), 
+                    chain:None, 
+                    range: input.input_pos..i.input_pos
+                })) 
+            } else {
+                Ok((i, o))
+            }
         }
-    }
-    pub fn report(&self, filename:&'static str) -> Report<'src, (&'src str, Range<usize>)> {
-        let report = Report::<'src, (&'src str, Range<usize>)>::build(ReportKind::Error, filename, self.range.start);
-        let mut report = report.with_message("Parse error");
-        report.add_label(self.make_label(filename));
-        let mut cerror = self;
-        while let Some(e) = cerror.chain.as_ref() {
-            cerror = e.as_ref();
-            report.add_label(cerror.make_label(filename));
-        }
-        report.finish()
-    }
 }
+
+
 
 fn ignore<'src>(input: Input<'src>) -> IResult<()> {
     value((), multispace0.and(opt(pair(char(';'), is_not("\n")))).and(multispace0))(input)
@@ -160,11 +104,14 @@ fn tag<'src>(tag_name:&'src str) -> impl Parser<Input<'src>, (), Error<'src>> {
     ))
 }
 
-fn many1<'src, O, G>(parser:G, name:&'static str) -> impl FnMut(Input<'src>) -> IResult<Vec<O>> 
+fn many1<'src, O, G>(mut parser:G, name:&'static str) -> impl FnMut(Input<'src>) -> IResult<Vec<O>> 
 where 
     O:'src,
-    G: FnMut(Input<'src>)->IResult<O>+Copy {
-        move |i:Input<'src>|nom::multi::many1(parser)(i).map_err(err_name(ErrorKind::Many1(name)))
+    G: FnMut(Input<'src>)->IResult<O> {
+        move |i:Input<'src>| {
+            let (i, o) = nom::multi::many1(|x|parser(x))(i).map_err(err_name(ErrorKind::Many1(name)))?;
+            Ok((i, o))
+        }
     }
 
 fn minus_separated(input:Input) -> IResult<Spanned<char>> {
@@ -187,7 +134,7 @@ pub fn preceded_span_included<'src, O1, O2, F, G>(mut first: F, mut second: G) -
 }
 
 pub fn char(c: char) -> impl Fn(Input) -> IResult<Spanned<char>> {
-    move |i| nom::character::complete::char(c)(i).map(|(i, o)| {let end = i.input_pos; (i, (Range{start:end-1, end}, o))})
+    move |i| nom::character::complete::char(c)(i).map(|(i, o)| {let end = i.input_pos; (i, (end-1..end, o))})
 }
 
 // pub fn delimited<'src, O1, O2, O3, F, G, H>(mut first: F, mut second: G, mut third: H) -> impl FnMut(Input<'src>) -> IResult<O2>
@@ -205,12 +152,15 @@ pub fn char(c: char) -> impl Fn(Input) -> IResult<Spanned<char>> {
 //     }
 //   }
 
-fn parens<'src, O2, G>(parser:G) -> impl FnMut(Input<'src>) -> IResult<O2> 
+fn parens<'src, O2, G>(mut parser:G) -> impl FnMut(Input<'src>) -> IResult<O2> 
 where 
     G: Parser<Input<'src>, O2, Error<'src>> {
-    delimited(|i|char('(')(i).map_err(err_name(ErrorKind::Parenthesis)), 
-        parser, 
-        terminated(|i|char(')')(i).map_err(err_name(ErrorKind::UnclosedParenthesis)), multispace0))
+    move |input| {
+        let (i, _) = terminated(char('('), ignore)(input).map_err(err_name(ErrorKind::Parenthesis))?; 
+        let (i, o) = parser.parse(i)?;
+        let (i, _) = terminated(char(')'), ignore)(i).map_err(err_name(ErrorKind::UnclosedParenthesis))?;
+        Ok((i, o))
+    }
 }
 
 fn pddl_anyletter(input: Input) -> IResult<Input> {
@@ -230,7 +180,7 @@ fn pddl_anyletter(input: Input) -> IResult<Input> {
 /// use pddl_rs::parser::{parse_domain, ast::Domain};
 /// let domain = parse_domain("(define (domain test))");
 /// assert_eq!(domain, Ok(
-///     Domain{name:(core::ops::Range{start:16, end:20}, "test"), 
+///     Domain{name:(16..20, "test"), 
 ///     requirements:enumset::EnumSet::EMPTY, 
 ///     types:vec![], 
 ///     constants:vec![],
@@ -276,24 +226,24 @@ fn require_def(input:Input) -> IResult<EnumSet<Requirement>> {
 
 fn require_key(input:Input) -> IResult<Requirement> {
     alt((
-        map(tag(":strips"), |_|Requirement::Strips),
-        map(tag(":typing"), |_|Requirement::Typing),
-        map(tag(":negative-preconditions"), |_|Requirement::NegativePreconditions),
-        map(tag(":disjunctive-preconditions"), |_|Requirement::DisjunctivePreconditions),
-        map(tag(":equality"), |_|Requirement::Equality),
-        map(tag(":existential-preconditions"), |_|Requirement::ExistentialPreconditions),
-        map(tag(":universal-preconditions"), |_|Requirement::UniversalPreconditions),
-        map(tag(":conditional-effects"), |_|Requirement::ConditionalEffects),
-        map(tag(":fluents"), |_|Requirement::ObjectFluents),
-        map(tag(":numeric-fluents"), |_|Requirement::NumericFluents),
-        map(tag(":durative-actions"), |_|Requirement::DurativeActions),
-        map(tag(":duration-inequalities"), |_|Requirement::DurationInequalities),
-        map(tag(":continuous-effects"), |_|Requirement::ContinuousEffects),
-        map(tag(":derived-predicates"), |_|Requirement::DerivedPredicates),
-        map(tag(":timed-initial-literals"), |_|Requirement::TimedInitialLiterals),
-        map(tag(":preferences"), |_|Requirement::Preferences),
-        map(tag(":constraints"), |_|Requirement::Constraints),
-        map(tag(":action-costs"), |_|Requirement::ActionCosts),
+        map(tag(":strips"), |_|Strips),
+        map(tag(":typing"), |_|Typing),
+        map(tag(":negative-preconditions"), |_|NegativePreconditions),
+        map(tag(":disjunctive-preconditions"), |_|DisjunctivePreconditions),
+        map(tag(":equality"), |_|Equality),
+        map(tag(":existential-preconditions"), |_|ExistentialPreconditions),
+        map(tag(":universal-preconditions"), |_|UniversalPreconditions),
+        map(tag(":conditional-effects"), |_|ConditionalEffects),
+        map(tag(":fluents"), |_|ObjectFluents),
+        map(tag(":numeric-fluents"), |_|NumericFluents),
+        map(tag(":durative-actions"), |_|DurativeActions),
+        map(tag(":duration-inequalities"), |_|DurationInequalities),
+        map(tag(":continuous-effects"), |_|ContinuousEffects),
+        map(tag(":derived-predicates"), |_|DerivedPredicates),
+        map(tag(":timed-initial-literals"), |_|TimedInitialLiterals),
+        map(tag(":preferences"), |_|Preferences),
+        map(tag(":constraints"), |_|Constraints),
+        map(tag(":action-costs"), |_|ActionCosts),
     ))(input) 
 }
 
@@ -301,8 +251,8 @@ fn types_def(input:Input) -> IResult<Vec<List>> {
     let r = input.requirements;
     let input_pos = input.input_pos;
     let result = parens(preceded(
-        check_requirements(tag(":types"), Requirement::Typing.into()), 
-        many1(typed_list(name), "typed list of names")
+        check_requirements(tag(":types"), enum_set!(Typing), enum_set!()), 
+        typed_list(name)
     ))(input);
     input_pos;
     result
@@ -311,7 +261,7 @@ fn types_def(input:Input) -> IResult<Vec<List>> {
 fn constants_def(input:Input) -> IResult<Vec<List>> {
     parens(preceded(
         tag(":constants"), 
-        many1(typed_list(name), "typed list of names")
+        typed_list(name)
     ))(input)
 }
 
@@ -330,48 +280,42 @@ fn variable(input:Input) -> IResult<Name> {
 
 
 fn atomic_function_skeleton(input: Input) -> IResult<AtomicFSkeleton> {
-    parens(pair(
+    parens(map(pair(
         function_symbol, 
-        many1(typed_list(variable), "typed list of variables")
-    )).map(|(name, variables)| AtomicFSkeleton{name, variables}).parse(input)
+        typed_list(variable)
+    ),|(name, variables)| AtomicFSkeleton{name, variables}))(input)
 }
 
 use name as function_symbol;
 
 fn functions_def(input:Input) -> IResult<Vec<FunctionTypedList>> {
     parens(preceded(
-        check_requirements(tag(":functions"), Requirement::ObjectFluents | Requirement::NumericFluents), 
+        check_requirements(tag(":functions"), enum_set!(ObjectFluents | NumericFluents), enum_set!(ActionCosts)), 
         many1(function_typed_list, "function typed list")
     ))(input)
 }
 
 fn function_typed_list(input:Input) -> IResult<FunctionTypedList> {
-    let requirements = input.requirements;
-    let result = map(pair(many1(atomic_function_skeleton, "atomic function skeleton"), 
-        preceded(minus_separated, function_type)
-    ), |(functions, kind)| FunctionTypedList{functions, kind})(input.clone());
-    if let Err(nom::Err::Error(Error{chain, input:src,..})) = result {
-        if requirements.contains(Requirement::NumericFluents) {
-            many1(atomic_function_skeleton, "atomic function skeleton").map(|functions| FunctionTypedList{functions, kind:FunctionType::None})
-                .parse(input).map_err(err_name(ErrorKind::FunctionTypedList))
-        } else {
-            Err(nom::Err::Error(Error{chain, input:src, kind:ErrorKind::FunctionTypedList, range:Range{start:0, end:1}}))
-        }
-    } else {
-        result
-    }
+    alt((
+        map(separated_pair(many1(atomic_function_skeleton, "atomic function skeleton"), minus_separated, function_type), |(functions, kind)| FunctionTypedList{functions, kind}),
+        map(check_requirements(many1(atomic_function_skeleton, "atomic function skeleton"), enum_set!(NumericFluents), enum_set!()), |functions| FunctionTypedList{functions, kind:FunctionType::None})
+        ))(input) //.map_err(err_name(ErrorKind::FunctionTypedList))
 }
 
 fn function_type(input:Input) -> IResult<FunctionType> {
-    alt((
-        map(check_requirements(digit0, Requirement::NumericFluents.into()), |o:Input| FunctionType::Numeric((Range{start:o.input_pos, end:o.input_pos+o.input_len()}, i64::from_str_radix(o.src, 10).unwrap()))),
-        map(check_requirements(r#type, Requirement::Typing | Requirement::ObjectFluents), |t| FunctionType::Typed(t))
-    ))(input).map_err(err_name(ErrorKind::FunctionType))
+    let src = input.src.chars().take(10).collect::<String>();
+    match alt((
+        map(alt_check_requirements(digit0, enum_set!(NumericFluents), enum_set!()), |o:Input| FunctionType::Numeric((o.input_pos..(o.input_pos+o.input_len()), i64::from_str_radix(o.src, 10).unwrap()))),
+        map(check_requirements(r#type, enum_set!(Typing | ObjectFluents), enum_set!(ActionCosts)), |t| FunctionType::Typed(t))
+    ))(input) {//.map_err(err_name(ErrorKind::FunctionType)) 
+        Ok(o) => {println!("function_type at {} succeeded.", src); Ok(o)},
+        Err(e) => {println!("function_type at {} failed.", src); Err(e)}
+    }
 }
 
 fn constraints(input:Input) -> IResult<ConstraintGD> {
     parens(preceded(
-        check_requirements(tag(":constraints"), Requirement::Constraints.into()), 
+        check_requirements(tag(":constraints"), enum_set!(Constraints), enum_set!()), 
         con_gd
     ))(input)
 }
@@ -385,12 +329,13 @@ fn structure_def(input:Input) -> IResult<Action> {
 }
 
 
-fn typed_list<'src, G>(parser:G) -> impl (FnMut(Input<'src>) -> IResult<List<'src>>) + Copy
+fn typed_list<'src, G>(parser:G) -> impl FnMut(Input<'src>) -> IResult<Vec<List<'src>>>
 where 
     G: FnMut(Input<'src>) -> IResult<Name<'src>>+Copy {
-        move |input|alt((
-            map(separated_pair(many1(parser, "name or variable"), check_requirements(minus_separated, Requirement::Typing.into()), r#type), |(items, kind)| List{items, kind}), 
-            map(many1(parser, "name or variable"), |items| List{items, kind:Type::None})
+        move |input| alt((
+            many1(map(separated_pair(many1(parser, "name or variable"), check_requirements(minus_separated, enum_set!(Typing), enum_set!()), r#type), |(items, kind)| List{items, kind}), "typed list"), 
+            many1(map(many0(parser), |items| List{items, kind:Type::None}), "list"),
+            map(many0(parser), |items| vec![List{items, kind:Type::None}])
         ))(input)
 }
 
@@ -416,7 +361,7 @@ where
 fn action_def(input:Input) -> IResult<BasicAction> {
     map(parens(tuple((
         preceded(tag(":action"), action_symbol),
-        preceded(tag(":parameters"), parens(many1(typed_list(variable), "typed list of variables"))),
+        preceded(tag(":parameters"), parens(typed_list(variable))),
         map(opt(preceded(tag(":precondition"), empty_or(pre_gd))), |o| o.and_then(|f| f)),
         map(opt(preceded(tag(":effect"), empty_or(effect))), |o| o.and_then(|f| f)),
     ))), |(name, parameters, precondition, effect)| BasicAction{name, parameters, precondition, effect})(input)
@@ -429,7 +374,7 @@ where
         parens(preceded(
             tag("forall"), 
             map(pair(
-                parens(many1( typed_list(variable), "typed list of variables")),
+                parens(typed_list(variable)),
                 parser
             ), |(variables, gd)| Forall{variables, gd:Box::new(gd)})
         ))
@@ -442,7 +387,7 @@ where
         parens(preceded(
             tag("exists"), 
             map(pair(
-                parens(many1( typed_list(variable), "typed list")),
+                parens(typed_list(variable)),
                 parser
             ), |(variables, gd)| Forall{variables, gd:Box::new(gd)})
         ))
@@ -467,7 +412,7 @@ fn pre_gd(input:Input) -> IResult<PreconditionExpr> {
         map(forall(pre_gd), |forall| PreconditionExpr::Forall(forall)),
         map(preference(gd), |pref| PreconditionExpr::Preference(pref)),
         map(gd, |gd| PreconditionExpr::GD(gd)),
-    ))(input).map_err(err_name(ErrorKind::PreconditionExpression))
+    ))(input) //.map_err(err_name(ErrorKind::PreconditionExpression))
 }
 
 use name as pref_name;
@@ -514,7 +459,7 @@ fn term(input:Input) -> IResult<Term> {
         variable.map(|o| Term::Variable(o)),
         name.map(|o| Term::Name(o)), 
         function_term.map(|o| Term::Function(o)),
-    ))(input).map_err(err_name(ErrorKind::Term))
+    ))(input) //.map_err(err_name(ErrorKind::Term))
 }
 
 fn function_term(input:Input) -> IResult<FunctionTerm> {
@@ -524,19 +469,19 @@ fn function_term(input:Input) -> IResult<FunctionTerm> {
                 let mut span = terms.range(); 
                 span.start = name.0.start; 
                 FunctionTerm{span, name, terms}
-            })), Requirement::ObjectFluents.into())(input)
+            })), enum_set!(ObjectFluents), enum_set!(ActionCosts))(input)
 }
 
 fn f_exp(input:Input) -> IResult<Spanned<FluentExpression>> {
     alt((
         map(digit0, |o:Input| {let src = o.src; (o.into(), FluentExpression::Number(i64::from_str_radix(src, 10).unwrap()))}),
         map(parens(preceded(tag("-"), f_exp)), |(r, args)| (r.clone(), FluentExpression::Negate(Box::new((r, args))))),
-        map(parens(preceded(tag("-"), pair(f_exp, f_exp))), |args| (Range{start:args.0.0.start, end:args.1.0.end}, FluentExpression::Subtract(Box::new(args)))),
-        map(parens(preceded(tag("/"), pair(f_exp, f_exp))), |args| (Range{start:args.0.0.start, end:args.1.0.end}, FluentExpression::Divide(Box::new(args)))),
+        map(parens(preceded(tag("-"), pair(f_exp, f_exp))), |args| (args.0.0.start..args.1.0.end, FluentExpression::Subtract(Box::new(args)))),
+        map(parens(preceded(tag("/"), pair(f_exp, f_exp))), |args| (args.0.0.start..args.1.0.end, FluentExpression::Divide(Box::new(args)))),
         map(parens(preceded(tag("+"), many1(f_exp, "fluent expression"))), |args| (args.range(), FluentExpression::Add(args))),
         map(parens(preceded(tag("*"), many1(f_exp, "fluent expression"))), |args| (args.range(), FluentExpression::Multiply(args))),
         map(f_head, |f| (f.span.clone(), FluentExpression::Function(f)))
-    ))(input).map_err(err_name(ErrorKind::FluentExpression))
+    ))(input) //.map_err(err_name(ErrorKind::FluentExpression))
 }
 
 fn f_head(input:Input) -> IResult<FunctionTerm> {
@@ -548,7 +493,7 @@ fn f_head(input:Input) -> IResult<FunctionTerm> {
 
 fn name(input:Input) -> IResult<Name> {
     terminated(
-        map(recognize(pair(alpha1, pddl_anyletter)), |o| (Range{start:o.input_pos, end:o.input_pos+o.src.len()}, o.src)),
+        map(recognize(pair(alpha1, pddl_anyletter)), |o| (o.input_pos..(o.input_pos+o.src.len()), o.src)),
         ignore
     )(input).map_err(err_name(ErrorKind::Name))
 }
@@ -566,7 +511,7 @@ fn effect(input:Input) -> IResult<Effect> {
         map(parens(preceded(tag("assign"), pair(f_head, f_exp))), |(t, e)| Effect::Assign(t, e)),
         map(parens(preceded(tag("assign"), pair(function_term, term))), |(t, e)| Effect::AssignTerm(t, e)),
         map(parens(preceded(tag("assign"), pair(f_head, tag("undefined")))), |(t, _)| Effect::AssignUndefined(t)),
-    ))(input).map_err(err_name(ErrorKind::Effect))
+    ))(input) //.map_err(err_name(ErrorKind::Effect))
 }
 
 fn durative_action_def(input:Input) -> IResult<DurativeAction> {
@@ -574,7 +519,7 @@ fn durative_action_def(input:Input) -> IResult<DurativeAction> {
         tag(":durative-action"),
         da_symbol,
         tag(":parameters"),
-        parens(many1(typed_list(variable), "variable typed list")),
+        parens(typed_list(variable)),
         tag(":duration"),
         duration_contraint,
         tag(":condition"),
@@ -642,12 +587,12 @@ fn timed_effect(input:Input) -> IResult<TimedEffect> {
 /// use pddl_rs::parser::{parse_problem, ast::{Problem, PreconditionExpr, GD, AtomicFormula, Term}};
 /// let problem = parse_problem("(define (problem test) (:domain td) (:goal (end)))", enumset::EnumSet::EMPTY);
 /// assert_eq!(problem, Ok(
-///     Problem{name:(core::ops::Range{start:17, end:21}, "test"), 
-///     domain:(core::ops::Range{start:32, end:34}, "td"),
+///     Problem{name:(17..21, "test"), 
+///     domain:(32..34, "td"),
 ///     requirements:enumset::EnumSet::EMPTY,
 ///     objects:vec![], 
 ///     init:vec![],
-///     goal:PreconditionExpr::GD(GD::AtomicFormula(AtomicFormula::Predicate((core::ops::Range{start:44, end:47}, "end"), vec![]))),
+///     goal:PreconditionExpr::GD(GD::AtomicFormula(AtomicFormula::Predicate((44..47, "end"), vec![]))),
 ///     constraints:None,
 ///     metric:None}))
 /// ```
@@ -658,7 +603,7 @@ pub fn parse_problem<'src>(src:&'src str, requirements:EnumSet<Requirement>) -> 
         parens(pair(tag("problem"), name)),
         parens(pair(tag(":domain"), name)),
         opt(require_def),
-        opt(parens(pair(tag(":objects"), many1(typed_list(name), "typed list of names")))),
+        opt(parens(pair(tag(":objects"), typed_list(name)))),
         opt(parens(pair(tag(":init"), many0(init_el)))),
         parens(pair(tag(":goal"), pre_gd)),
         opt(parens(pair(tag(":constraints"), pref_con_gd))),
@@ -737,8 +682,6 @@ fn metric_f_exp(input:Input) -> IResult<MetricFluentExpr> {
 
 #[cfg(test)]
 mod tests {
-    use ariadne::Source;
-
     use super::*;
 
     #[test]
@@ -749,51 +692,53 @@ mod tests {
         )));
         assert_eq!(name(Input::new("He-l_lo world")), 
             Ok((Input{src:"world", input_pos:8, requirements:EnumSet::EMPTY}, 
-            (Range{start:0, end:7}, "He-l_lo")
+            (0..7, "He-l_lo")
         )));
         assert_eq!(name(Input::new("#$Hello")), 
-            Err(nom::Err::Error(Error{input:"#$Hello", kind:ErrorKind::Name, chain:None, range:Range { start: 0, end: 0 }}))
+            Err(nom::Err::Error(Error{input:Some("#$Hello"), kind:ErrorKind::Name, chain:None, range:0..0}))
         );
         assert_eq!(variable(Input::new("?test me")), 
-            Ok((Input{src:"me", input_pos:6, requirements:EnumSet::EMPTY}, 
-            (Range{start:0, end:5},"test")
+            Ok((Input{src:"me", input_pos:6, requirements:EnumSet::EMPTY}, (0..5,"test")
         )));
 
         assert_eq!(pair(name, variable)(Input::new("hello ?world")), 
-            Ok((Input{src:"", input_pos:12, requirements:EnumSet::EMPTY}, ((Range{start:0, end:5}, "hello"), (Range{start:6, end:12}, "world")))));
+            Ok((Input{src:"", input_pos:12, requirements:EnumSet::EMPTY}, ((0..5, "hello"), (6..12, "world")))));
 
-        assert_eq!(term(Input{src:"(test ?one)  ", input_pos:0, requirements:Requirement::ObjectFluents.into()}), 
-            Ok((Input{src:"", input_pos:13, requirements:Requirement::ObjectFluents.into()}, 
-            Term::Function(FunctionTerm{span:Range{start:1, end:10}, name:(Range{start:1, end:5}, "test"), terms:vec![Term::Variable((Range{start:6, end:10}, "one"))]})
+        assert_eq!(term(Input{src:"(test ?one)  ", input_pos:0, requirements:enum_set!(ObjectFluents)}), 
+            Ok((Input{src:"", input_pos:13, requirements:enum_set!(ObjectFluents)}, 
+            Term::Function(FunctionTerm{span:1..10, name:(1..5, "test"), terms:vec![Term::Variable((6..10, "one"))]})
         )));
-        let test = Error{input:"(test ?one)  ", kind:ErrorKind::Term, range:Range { start: 0, end: 5 }, chain:Some(Box::new(
-            Error::unset_requirement(Input{src:"(test ?one)  ", input_pos:0, requirements:EnumSet::EMPTY}, Requirement::ObjectFluents.into())))
-        };
+        let test = Error { input: Some("(test ?one)  "), kind:ErrorKind::UnsetRequirement(enum_set!(ObjectFluents)), chain: None, range: 0..13 };
+        // test.clone().report("stdio").eprint(("stdio", ariadne::Source::from("(test ?one)  ")));
         assert_eq!(term(Input::new("(test ?one)  ")), 
-            Err(nom::Err::Error(test.clone())));
-        // test.report("stdio").eprint(("stdio", Source::from("(test ?one)  ")));
+            Err(nom::Err::Failure(test)));
         assert_eq!(term(Input::new("?hello")), 
-            Ok((Input{src:"", input_pos:6, requirements:EnumSet::EMPTY}, Term::Variable((Range{start:0, end:6}, "hello")))));
-        assert_eq!(typed_list(name)(Input{src:"one two - object", input_pos:0, requirements:Requirement::Typing.into()}), 
-            Ok((Input{src:"", input_pos:16, requirements:Requirement::Typing.into()}, 
-            List{items:vec![(Range{start:0, end:3}, "one"), (Range{start:4, end:7}, "two")], kind:Type::Exact((Range{start:10, end:16}, "object"))})));
+            Ok((Input{src:"", input_pos:6, requirements:EnumSet::EMPTY}, Term::Variable((0..6, "hello")))));
+        assert_eq!(typed_list(name)(Input{src:"one two - object", input_pos:0, requirements:enum_set!(Typing)}), 
+            Ok((Input{src:"", input_pos:16, requirements:enum_set!(Typing)}, 
+            vec![List{items:vec![(0..3, "one"), (4..7, "two")], kind:Type::Exact((10..16, "object"))}])));
         assert_eq!(typed_list(name)(Input::new("one two")), 
             Ok((Input{src:"", input_pos:7, requirements:EnumSet::EMPTY}, 
-                List{items:vec![(Range{start:0, end:3}, "one"), (Range{start:4, end:7}, "two")], kind:Type::None})));
+                vec![List{items:vec![(0..3, "one"), (4..7, "two")], kind:Type::None}])));
         assert_eq!(typed_list(variable)(Input::new("?a1")), 
             Ok((Input{src:"", input_pos:3, requirements:EnumSet::EMPTY}, 
-                List{items:vec![(Range{start:0, end:3}, "a1")], kind:Type::None})));
+                vec![List{items:vec![(0..3, "a1")], kind:Type::None}])));
         assert_eq!(atomic_function_skeleton(Input::new("(testing ?left ?right)")), 
             Ok((Input{src:"", input_pos:22, requirements:EnumSet::EMPTY}, 
-            AtomicFSkeleton{name:(Range{start:1, end:8}, "testing"), 
-            variables:vec![List{items:vec![(Range{start:9, end:14}, "left"), (Range{start:15, end:21}, "right")], kind:Type::None}]})))
+            AtomicFSkeleton{name:(1..8, "testing"), 
+            variables:vec![List{items:vec![(9..14, "left"), (15..21, "right")], kind:Type::None}]})))
+    }
+
+    #[test]
+    fn test_typed_list() {
+        assert_eq!(typed_list(variable)(Input::new("?one ?two")), Ok((Input{src:"", input_pos:9, requirements:EnumSet::EMPTY}, vec![List{items:vec![(0..4, "one"), (5..9, "two")], kind:Type::None}])));
     }
     // #[test]
     // fn test_def() {
-    //     assert_eq!(require_def("(:requirements :typing :strips)"), Ok(("", Requirement::Typing | Requirement::Strips)));
-    //     assert_eq!(types_def("(:types one two three - object four five - three)", Requirement::Typing.into()), Ok(("", vec![List{items:vec!["one", "two", "three"], kind:Type::Exact("object")}, List{items:vec!["four", "five"], kind:Type::Exact("three")}])));
-    //     assert_eq!(constants_def("(:constants one two three - object four five - three)", Requirement::Typing.into()), Ok(("", vec![List{items:vec!["one", "two", "three"], kind:Type::Exact("object")}, List{items:vec!["four", "five"], kind:Type::Exact("three")}])));
-    //     assert_eq!(functions_def("(:functions (f1 ?a1) - 1)", Requirement::NumericFluents | Requirement::ObjectFluents), Ok(("", vec![FunctionTypedList{functions:vec![AtomicFSkeleton{name:"f1", variables:vec![List{items:vec!["a1"], kind:Type::None}]}], kind:FunctionType::Numeric(1)}])))
+    //     assert_eq!(require_def("(:requirements :typing :strips)"), Ok(("", Typing | Strips)));
+    //     assert_eq!(types_def("(:types one two three - object four five - three)", enum_set!(Typing)), Ok(("", vec![List{items:vec!["one", "two", "three"], kind:Type::Exact("object")}, List{items:vec!["four", "five"], kind:Type::Exact("three")}])));
+    //     assert_eq!(constants_def("(:constants one two three - object four five - three)", enum_set!(Typing)), Ok(("", vec![List{items:vec!["one", "two", "three"], kind:Type::Exact("object")}, List{items:vec!["four", "five"], kind:Type::Exact("three")}])));
+    //     assert_eq!(functions_def("(:functions (f1 ?a1) - 1)", NumericFluents | ObjectFluents), Ok(("", vec![FunctionTypedList{functions:vec![AtomicFSkeleton{name:"f1", variables:vec![List{items:vec!["a1"], kind:Type::None}]}], kind:FunctionType::Numeric(1)}])))
     // }
 
     // #[test]
