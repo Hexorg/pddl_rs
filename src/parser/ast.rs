@@ -1,4 +1,4 @@
-use std::{str::FromStr, ops::Range};
+use std::ops::Range;
 
 use enumset::{EnumSet, EnumSetType};
 

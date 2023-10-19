@@ -1,5 +1,5 @@
 
-use std::{collections::{HashMap}, hash::Hash, ops::Range, slice::Iter};
+use std::{collections::HashMap, ops::Range, slice::Iter};
 
 use enumset::EnumSet;
 
@@ -247,7 +247,12 @@ fn compile_gd<'src>(compiler:&CompilerData<'src>, gd:&GD<'src>, args:Option<&[(&
 
 fn compile_precondition<'src>(compiler:&CompilerData<'src>, precondition:&PreconditionExpr<'src>, args:Option<&[(&Name<'src>, &Name<'src>)]>, instructions: &mut Vec<Instruction>) -> Result<(), Error<'src>> {
     match precondition {
-        PreconditionExpr::And(vec) => { for preconditions in vec { compile_precondition(compiler, preconditions, args, instructions)? } Ok(())}
+        PreconditionExpr::And(vec) => { 
+            for preconditions in vec { 
+                compile_precondition(compiler, preconditions, args, instructions)? 
+            } 
+            instructions.push(Instruction::And(vec.len()));
+            Ok(())}
         PreconditionExpr::Forall(_) => todo!(),
         PreconditionExpr::Preference(_) => todo!(),
         PreconditionExpr::GD(gd) => compile_gd(compiler, gd, args, instructions),
@@ -286,7 +291,7 @@ enum SupportedFunctionOp {
     DEC
 }
 fn function_op<'src>(compiler:&CompilerData<'src>, function:&FunctionTerm<'src>, fexp:&FluentExpression<'src>, op:SupportedFunctionOp, instructions: &mut Vec<Instruction>) -> Result<(), Error<'src>> {
-    compile_fexp(compiler, fexp, instructions);
+    compile_fexp(compiler, fexp, instructions)?;
     if function.terms.len() == 0 && function.name.1 == "total-cost" && compiler.requirements.contains(Requirement::ActionCosts) {
         use SupportedFunctionOp::*;
         match op {
@@ -337,10 +342,9 @@ fn compile_basic_action<'src>(compiler:&CompilerData<'src>, args:Option<&[(&Name
 /// * `compiler` - all pre-computed maps maintained by the compiler
 /// * `domain` - PDDL Domain that defines all the actions needed to create.
 fn create_concrete_actions<'src>(compiler:&CompilerData<'src>, domain:&Domain<'src>) -> Result<Vec<CompiledAction<'src>>, Error<'src>> {
-    use ErrorKind::UndefinedType;
     let mut all_actions = Vec::with_capacity(compiler.predicate_memory_map.len()*domain.actions.len()/5);
     for action in &domain.actions {
-        if let Action::Basic(action @ BasicAction{parameters,name,..}) = action {
+        if let Action::Basic(action @ BasicAction{parameters,..}) = action {
             // Create action for all type-object permutations.
             let actions = for_all_type_object_permutations(&compiler.type_to_objects_map, parameters.as_slice(), |args| compile_basic_action(compiler, Some(args), action))?;
             all_actions.extend(actions)
@@ -357,7 +361,6 @@ fn create_concrete_actions<'src>(compiler:&CompilerData<'src>, domain:&Domain<'s
 /// * `domain` - PDDL Domain
 /// * `problem` - PDDL Problem
 fn map_objects<'src>(domain:&Domain<'src>, problem:&Problem<'src>) -> Result<CompilerData<'src>, Error<'src>> {
-    use ErrorKind::UndefinedType;
     let requirements = domain.requirements | problem.requirements;
     let mut type_tree = HashMap::new();
     let mut type_src_pos = HashMap::new();
@@ -414,19 +417,18 @@ fn map_objects<'src>(domain:&Domain<'src>, problem:&Problem<'src>) -> Result<Com
 
 #[cfg(test)]
 pub mod tests {
-    use std::{fs, collections::HashMap};
+    use std::fs;
     use crate::{parser::{parse_domain, parse_problem}, compiler::compile_problem};
-    use super::{map_objects, create_concrete_actions};
 
     #[test]
-    fn test_type_map() {
-        let filename = "domain.pddl";
+    fn test_barman_domain() {
+        let filename = "barman_domain.pddl";
         let domain_src = fs::read_to_string(filename).unwrap();
         let domain = match parse_domain(&domain_src) {
             Err(e) => {e.report(filename).eprint((filename, ariadne::Source::from(&domain_src))); panic!() },
             Ok(d) => d,
         };
-        let filename = "problem_5_10_7.pddl";
+        let filename = "barman_problem_5_10_7.pddl";
         let problem_src = fs::read_to_string(filename).unwrap();
         let problem = match parse_problem(&problem_src, domain.requirements) {
             Err(e) => {e.report(filename).eprint((filename, ariadne::Source::from(&problem_src))); panic!() },
