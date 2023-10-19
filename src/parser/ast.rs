@@ -47,12 +47,6 @@ pub struct Problem<'src> {
     // pub length: Option<LengthSpecification>, // deprecated since PDDL 2.1
 }
 
-#[derive(PartialEq, Debug)]
-pub struct LengthSpecification {
-    serial: Option<i64>,
-    parallel: Option<i64>
-}
-
 
 #[derive(PartialEq, Debug)]
 pub struct Domain<'src> {
@@ -408,12 +402,20 @@ pub enum NegativeFormula<'src, T> {
 }
 
 
+/// Function name with 0 or more arguments
 #[derive(PartialEq, Debug)]
 pub struct FunctionTerm<'src> {
-    pub span:Range<usize>,
     pub name:Name<'src>,
     pub terms:Vec<Term<'src>>
 }
+
+impl<'src> SpannedAst for FunctionTerm<'src> {
+    fn range(&self) -> Range<usize> {
+        self.name.0.start..self.terms.range().end
+    }
+}
+
+/// A name, variable, or function
 #[derive(PartialEq, Debug)]
 pub enum Term<'src> {
     Name(Name<'src>),
@@ -426,7 +428,7 @@ impl<'src> SpannedAst for Term<'src> {
         match self {
             Self::Name(n) => n.0.clone(),
             Self::Variable(v) => v.0.clone(),
-            Self::Function(f) => f.span.clone()
+            Self::Function(f) => f.range()
         }
     }
 }

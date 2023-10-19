@@ -5,6 +5,9 @@ edition = "2021"
 description = "PDDL parser"
 license = "MIT"
 
+[profile.release]
+debug = true
+
 [lib]
 name = "pddl_rs"
 

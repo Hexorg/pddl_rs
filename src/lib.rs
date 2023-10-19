@@ -25,6 +25,10 @@ enum ErrorKind<'src> {
     FunctionTypedList,
     // Compiler Errors
     MissmatchedDomain(&'src str),
+    UndefinedType,
+    ExpectedVariable,
+    ExpectedName,
+    UndeclaredVariable,
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -53,24 +57,29 @@ impl<'src> Error<'src> {
 
 impl<'src> Error<'src> {
     fn make_label(&self, filename:&'static str) -> ariadne::Label<(&'src str, Range<usize>)> {
+        use ErrorKind::*;
         let label = ariadne::Label::new((filename, self.range.clone()));
         match self.kind {
-            ErrorKind::Nom(_) => todo!(),
-            ErrorKind::UnsetRequirement(r) => label.with_message(format!("Unset requirements {}.", r.into_iter().map(|x| x.to_string()).collect::<Vec<String>>().join(", "))),
-            ErrorKind::Tag(name) => label.with_message(format!("Expected keyword {}.", name)),
-            ErrorKind::Many1(name) => label.with_message(format!("Expected one or more {}.", name)),
-            ErrorKind::FunctionType => todo!(),
-            ErrorKind::Name => todo!(),
-            ErrorKind::Variable => todo!(),
-            ErrorKind::Parenthesis => label.with_message("Expected '('."),
-            ErrorKind::UnclosedParenthesis => label.with_message("Expected ')'."),
-            ErrorKind::PreconditionExpression => label.with_message("Expected precondition expression."),
-            ErrorKind::Effect => todo!(),
-            ErrorKind::FluentExpression => todo!(),
-            ErrorKind::GD => label.with_message("Expected GD."),
-            ErrorKind::Term => label.with_message("Expected name, variable, or function term if :object-fluents is set."),
-            ErrorKind::FunctionTypedList => todo!(),
-            ErrorKind::MissmatchedDomain(name) => label.with_message(format!("Problem and Domain names missmatch. Expected {}.", name)),
+            Nom(_) => todo!(),
+            UnsetRequirement(r) => label.with_message(format!("Unset requirements {}.", r.into_iter().map(|x| x.to_string()).collect::<Vec<String>>().join(", "))),
+            Tag(name) => label.with_message(format!("Expected keyword {}.", name)),
+            Many1(name) => label.with_message(format!("Expected one or more {}.", name)),
+            FunctionType => todo!(),
+            Name => todo!(),
+            Variable => todo!(),
+            Parenthesis => label.with_message("Expected '('."),
+            UnclosedParenthesis => label.with_message("Expected ')'."),
+            PreconditionExpression => label.with_message("Expected precondition expression."),
+            Effect => todo!(),
+            FluentExpression => todo!(),
+            GD => label.with_message("Expected GD."),
+            Term => label.with_message("Expected name, variable, or function term if :object-fluents is set."),
+            FunctionTypedList => todo!(),
+            MissmatchedDomain(name) => label.with_message(format!("Problem and Domain names missmatch. Expected {}.", name)),
+            UndefinedType => label.with_message("Domain :types() does not declare this type."),
+            ExpectedVariable => label.with_message("Expected variable."),
+            UndeclaredVariable => label.with_message("Undeclared variable."),
+            ExpectedName => label.with_message("Expected name."),
         }
     }
     pub fn report(&self, filename:&'static str) -> ariadne::Report<'src, (&'src str, Range<usize>)> {

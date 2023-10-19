@@ -26,24 +26,29 @@ fn err_name<'src>(ek: ErrorKind<'src>) -> impl FnMut(nom::Err<Error<'src>>) -> n
     move |e| 
         e.map(|Error{input, chain, mut range, mut kind}| {
             let input = input.unwrap();
+            use ErrorKind::*;
             let len = match ek {
-                ErrorKind::Nom(_) => todo!(),
-                ErrorKind::UnsetRequirement(_) => todo!(),
-                ErrorKind::Name |
-                ErrorKind::Variable |
-                ErrorKind::Term |
-                ErrorKind::FunctionType |
-                ErrorKind::GD |
-                ErrorKind::PreconditionExpression |
-                ErrorKind::FluentExpression |
-                ErrorKind::FunctionTypedList |
-                ErrorKind::Effect |
-                ErrorKind::Tag(_) => input.char_indices().find(|(_, c)| c.is_ascii_whitespace()).and_then(|(p, _)| Some(p)).unwrap_or(0),
-                ErrorKind::Many1(_) |
-                ErrorKind::UnclosedParenthesis|
-                ErrorKind::Parenthesis => 1,
+                Nom(_) => todo!(),
+                UnsetRequirement(_) => todo!(),
+                Name |
+                Variable |
+                Term |
+                FunctionType |
+                GD |
+                PreconditionExpression |
+                FluentExpression |
+                FunctionTypedList |
+                Effect |
+                Tag(_) => input.char_indices().find(|(_, c)| c.is_ascii_whitespace()).and_then(|(p, _)| Some(p)).unwrap_or(0),
+                Many1(_) |
+                UnclosedParenthesis|
+                Parenthesis => 1,
                 // Compiler errors:
-                ErrorKind::MissmatchedDomain(_) => panic!(),
+                MissmatchedDomain(_) |
+                ExpectedVariable |
+                ExpectedName |
+                UndeclaredVariable |
+                UndefinedType => panic!(),
             };
             if let ErrorKind::Nom(_) = kind {
                 range = range.start..(range.start+len);
@@ -304,13 +309,10 @@ fn function_typed_list(input:Input) -> IResult<FunctionTypedList> {
 
 fn function_type(input:Input) -> IResult<FunctionType> {
     let src = input.src.chars().take(10).collect::<String>();
-    match alt((
+    alt((
         map(alt_check_requirements(digit0, enum_set!(NumericFluents), enum_set!()), |o:Input| FunctionType::Numeric((o.input_pos..(o.input_pos+o.input_len()), i64::from_str_radix(o.src, 10).unwrap()))),
         map(check_requirements(r#type, enum_set!(Typing | ObjectFluents), enum_set!(ActionCosts)), |t| FunctionType::Typed(t))
-    ))(input) {//.map_err(err_name(ErrorKind::FunctionType)) 
-        Ok(o) => {println!("function_type at {} succeeded.", src); Ok(o)},
-        Err(e) => {println!("function_type at {} failed.", src); Err(e)}
-    }
+    ))(input).map_err(err_name(ErrorKind::FunctionType))
 }
 
 fn constraints(input:Input) -> IResult<ConstraintGD> {
@@ -465,11 +467,8 @@ fn term(input:Input) -> IResult<Term> {
 fn function_term(input:Input) -> IResult<FunctionTerm> {
         check_requirements(parens(map(
             pair(function_symbol, many0(term)), 
-            |(name, terms)| { 
-                let mut span = terms.range(); 
-                span.start = name.0.start; 
-                FunctionTerm{span, name, terms}
-            })), enum_set!(ObjectFluents), enum_set!(ActionCosts))(input)
+            |(name, terms)| FunctionTerm{name, terms})),
+            enum_set!(ObjectFluents), enum_set!(ActionCosts))(input)
 }
 
 fn f_exp(input:Input) -> IResult<Spanned<FluentExpression>> {
@@ -480,14 +479,14 @@ fn f_exp(input:Input) -> IResult<Spanned<FluentExpression>> {
         map(parens(preceded(tag("/"), pair(f_exp, f_exp))), |args| (args.0.0.start..args.1.0.end, FluentExpression::Divide(Box::new(args)))),
         map(parens(preceded(tag("+"), many1(f_exp, "fluent expression"))), |args| (args.range(), FluentExpression::Add(args))),
         map(parens(preceded(tag("*"), many1(f_exp, "fluent expression"))), |args| (args.range(), FluentExpression::Multiply(args))),
-        map(f_head, |f| (f.span.clone(), FluentExpression::Function(f)))
+        map(f_head, |f| (f.range(), FluentExpression::Function(f)))
     ))(input) //.map_err(err_name(ErrorKind::FluentExpression))
 }
 
 fn f_head(input:Input) -> IResult<FunctionTerm> {
     alt((
         function_term,
-        map(function_symbol, |name| FunctionTerm{span:name.range(), name, terms:Vec::new()})
+        map(function_symbol, |name| FunctionTerm{name, terms:Vec::new()})
     ))(input)
 }
 
@@ -706,7 +705,7 @@ mod tests {
 
         assert_eq!(term(Input{src:"(test ?one)  ", input_pos:0, requirements:enum_set!(ObjectFluents)}), 
             Ok((Input{src:"", input_pos:13, requirements:enum_set!(ObjectFluents)}, 
-            Term::Function(FunctionTerm{span:1..10, name:(1..5, "test"), terms:vec![Term::Variable((6..10, "one"))]})
+            Term::Function(FunctionTerm{name:(1..5, "test"), terms:vec![Term::Variable((6..10, "one"))]})
         )));
         let test = Error { input: Some("(test ?one)  "), kind:ErrorKind::UnsetRequirement(enum_set!(ObjectFluents)), chain: None, range: 0..13 };
         // test.clone().report("stdio").eprint(("stdio", ariadne::Source::from("(test ?one)  ")));
