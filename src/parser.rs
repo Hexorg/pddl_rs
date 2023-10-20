@@ -28,8 +28,8 @@ fn err_name<'src>(ek: ErrorKind<'src>) -> impl FnMut(nom::Err<Error<'src>>) -> n
             let input = input.unwrap();
             use ErrorKind::*;
             let len = match ek {
-                Nom(_) => todo!(),
-                UnsetRequirement(_) => todo!(),
+                Nom(_) |
+                UnsetRequirement(_) |
                 Name |
                 Variable |
                 Term |
@@ -82,16 +82,15 @@ pub fn alt_check_requirements<'src, O, F>(mut parser:F, required:EnumSet<Require
     O: 'src,
     F: Parser<Input<'src>, O, Error<'src>> {
         move |input: Input<'src>| {
-            let (i, o) = parser.parse(input.clone())?;
-            if !(i.requirements.is_superset(required) ||(!or.is_empty() && i.requirements.is_superset(or))) {
-                Err(nom::Err::Error(Error{
+            if !(input.requirements.is_superset(required) ||(!or.is_empty() && input.requirements.is_superset(or))) {
+                Err(err_name(ErrorKind::UnsetRequirement(required))(nom::Err::Error(Error{
                     input:Some(input.src), 
                     kind: ErrorKind::UnsetRequirement(required), 
                     chain:None, 
-                    range: input.input_pos..i.input_pos
-                })) 
+                    range: input.input_pos..input.input_pos
+                })))
             } else {
-                Ok((i, o))
+                parser.parse(input.clone())
             }
         }
 }
@@ -458,9 +457,9 @@ where
 
 fn term(input:Input) -> IResult<Term> {
     alt((
-        variable.map(|o| Term::Variable(o)),
-        name.map(|o| Term::Name(o)), 
-        function_term.map(|o| Term::Function(o)),
+        map(variable, |o| Term::Variable(o)),
+        map(name, |o| Term::Name(o)), 
+        alt_check_requirements(map(function_term, |o| Term::Function(o)), enum_set!(ObjectFluents), enum_set!(ActionCosts)),
     ))(input) //.map_err(err_name(ErrorKind::Term))
 }
 
@@ -732,20 +731,15 @@ mod tests {
     fn test_typed_list() {
         assert_eq!(typed_list(variable)(Input::new("?one ?two")), Ok((Input{src:"", input_pos:9, requirements:EnumSet::EMPTY}, vec![List{items:vec![(0..4, "one"), (5..9, "two")], kind:Type::None}])));
     }
-    // #[test]
-    // fn test_def() {
-    //     assert_eq!(require_def("(:requirements :typing :strips)"), Ok(("", Typing | Strips)));
-    //     assert_eq!(types_def("(:types one two three - object four five - three)", enum_set!(Typing)), Ok(("", vec![List{items:vec!["one", "two", "three"], kind:Type::Exact("object")}, List{items:vec!["four", "five"], kind:Type::Exact("three")}])));
-    //     assert_eq!(constants_def("(:constants one two three - object four five - three)", enum_set!(Typing)), Ok(("", vec![List{items:vec!["one", "two", "three"], kind:Type::Exact("object")}, List{items:vec!["four", "five"], kind:Type::Exact("three")}])));
-    //     assert_eq!(functions_def("(:functions (f1 ?a1) - 1)", NumericFluents | ObjectFluents), Ok(("", vec![FunctionTypedList{functions:vec![AtomicFSkeleton{name:"f1", variables:vec![List{items:vec!["a1"], kind:Type::None}]}], kind:FunctionType::Numeric(1)}])))
-    // }
+    
+    #[test]
+    fn test_atomic_formula() {
+        assert_eq!(atomic_formula(term)(Input::new("(ball ?obj)")), Ok((Input{src:"", input_pos:11, requirements:EnumSet::EMPTY}, AtomicFormula::Predicate((1..5, "ball"), vec![Term::Variable((6..10, "obj"))]))))
+    }
 
-    // #[test]
-    // fn test_print_error() {
-    //     let src = "(test ?one)  ";
-    //     if let Err(nom::Err::Error(e)) = term(src, EnumSet::EMPTY) {
-    //         assert_eq!(e.report("report.pddl").print(("report.pddl", ariadne::Source::from(src))).is_ok(), true);
-    //     }
-    // }
+    #[test]
+    fn test_gd() {
+        assert_eq!(gd(Input::new("(and (ball ?obj))")), Ok((Input{src:"", input_pos:17, requirements:EnumSet::EMPTY}, GD::And(vec![GD::AtomicFormula(AtomicFormula::Predicate((6..10, "ball"), vec![Term::Variable((11..15, "obj"))]))]))))
+    }
 
 }

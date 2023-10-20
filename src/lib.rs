@@ -1,6 +1,7 @@
 
 pub mod parser;
 pub mod compiler;
+// pub mod search;
 
 use std::ops::Range;
 pub use enumset::EnumSet;

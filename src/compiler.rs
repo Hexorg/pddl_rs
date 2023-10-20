@@ -23,6 +23,40 @@ pub enum Instruction {
 
 }
 
+pub trait Runnable {
+    fn run(&self, state: &mut[bool]) -> bool;
+}
+
+impl Runnable for Vec<Instruction> {
+    fn run(&self, state: &mut[bool]) -> bool {
+        let mut stack = Vec::with_capacity(512);
+        for instruction in self {
+            match instruction {
+                Instruction::ReadState(addr) => stack.push(state[*addr]),
+                Instruction::SetState(addr) => state[*addr] = stack.pop().unwrap(),
+                Instruction::ReadFunction(_) => todo!(),
+                Instruction::WriteFunction(_) => todo!(),
+                Instruction::And(count) => {
+                    let mut result = true;
+                    let mut count = *count;
+                    while count > 0 {
+                        result &= stack.pop().unwrap();
+                        count -= 1;
+                    }
+                    stack.push(result);
+                }
+                Instruction::Not => {let s = !stack.pop().unwrap(); stack.push(s); }
+                Instruction::Or => todo!(),
+                Instruction::Add => todo!(),
+                Instruction::Sub => todo!(),
+                Instruction::Push(_) => todo!(),
+                Instruction::Pop(_) => todo!(),
+            }
+        }
+        stack.pop().unwrap_or_default()
+    }
+}
+
 /// Flatenned problem ready for solving
 /// All instrutions use shared memory offsets 
 /// no larger than `self.memory_size`
@@ -38,9 +72,9 @@ pub struct CompiledProblem<'src> {
 /// All instruction offsets point to shared memory
 #[derive(Debug, PartialEq)]
 pub struct CompiledAction<'src> {
-    name: Name<'src>,
-    precondition: Vec<Instruction>,
-    effect: Vec<Instruction>,
+    pub name: Name<'src>,
+    pub precondition: Vec<Instruction>,
+    pub effect: Vec<Instruction>,
 }
 
 #[derive(Debug)]
@@ -67,6 +101,7 @@ pub fn compile_problem<'src>(domain:&Domain<'src>, problem:&Problem<'src>) -> Re
     let actions = create_concrete_actions(&compiler, domain)?;
     let init = compile_init(&compiler, &problem.init)?;
     let mut goal = Vec::with_capacity(32);
+
     compile_precondition(&compiler, &problem.goal, None, &mut goal)?;
     Ok(CompiledProblem{memory_size:compiler.predicate_memory_map.len(), actions, init, goal})
 }
@@ -422,13 +457,13 @@ pub mod tests {
 
     #[test]
     fn test_barman_domain() {
-        let filename = "barman_domain.pddl";
+        let filename = "sample_problems/simple_domain.pddl";
         let domain_src = fs::read_to_string(filename).unwrap();
         let domain = match parse_domain(&domain_src) {
             Err(e) => {e.report(filename).eprint((filename, ariadne::Source::from(&domain_src))); panic!() },
             Ok(d) => d,
         };
-        let filename = "barman_problem_5_10_7.pddl";
+        let filename = "sample_problems/simple_problem.pddl";
         let problem_src = fs::read_to_string(filename).unwrap();
         let problem = match parse_problem(&problem_src, domain.requirements) {
             Err(e) => {e.report(filename).eprint((filename, ariadne::Source::from(&problem_src))); panic!() },
@@ -439,7 +474,6 @@ pub mod tests {
             Ok(cd) => cd,
         };
         println!("Compiled problem needs {} bits of memory and uses {} actions.", c_problem.memory_size, c_problem.actions.len());
-        println!("Goal: {:#?}", c_problem.goal);
     }
 
 
