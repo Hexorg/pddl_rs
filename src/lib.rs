@@ -175,17 +175,18 @@ mod tests {
     use ariadne::Source;
     use enumset::EnumSet;
 
-    use crate::parser::{self, ast::Requirement};
+    use crate::parser::{self};
 
     #[test]
-    fn test_domain() {
+    fn test_domain() -> std::io::Result<()> {
         let filename = "problem_5_10_7.pddl";
         // let code = std::fs::read_to_string(filename).unwrap();
         let code = "(define (problem test) (:domain td) (:goal (end)))";
         match parser::parse_problem(code,  EnumSet::EMPTY) {
             Ok(problem) => println!("{:?}", problem),
-            Err(e) => {e.report(&filename).eprint((filename, Source::from(code)));},
+            Err(e) => {e.report(&filename).eprint((filename, Source::from(code)))?;},
         }
+        Ok(())
         // let t:Option<Result<(), ()>> = Some(Err(()));
         // let t = t.and_then(|r| r.or_else(|e| return Some(Err(e))));
         // let mut parser = parser::Parser::new(code.as_str(), Some(filename));

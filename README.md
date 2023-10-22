@@ -1,4 +1,4 @@
-[![Build status](https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml/badge.svg)(https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml)]
+[![Build status](https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml/badge.svg)](https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml)
 
 # pddl_rs
 
