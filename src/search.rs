@@ -138,7 +138,7 @@ mod test {
 
     fn full_search(domain_filename:&'static str, problem_filename:&'static str) -> std::io::Result<Vec<usize>> {
         use std::{fs, env, path::Path};
-        let workspace_path = match env::var("GITHUB_WORKSPACE ") {
+        let workspace_path = match env::var("GITHUB_WORKSPACE") {
             Ok(path) => path,
             Err(_) => match env::var("CARGO_MANIFEST_DIR") {
                 Ok(path) => path,
