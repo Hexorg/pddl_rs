@@ -1,7 +1,7 @@
 
 pub mod parser;
 pub mod compiler;
-// pub mod search;
+pub mod search;
 
 use std::ops::Range;
 pub use enumset::EnumSet;
@@ -14,10 +14,16 @@ enum ErrorKind<'src> {
     Tag(&'src str),
     Many1(&'static str),
     FunctionType,
+    Type,
+    TypedList,
+    StructureDef,
     Name,
     Variable,
+    Literal,
+    AtomicFormula,
+    FunctionTerm,
     Parenthesis,
-    UnclosedParenthesis,
+    UnclosedParenthesis(usize), // usize-position of matched openning '('
     PreconditionExpression,
     Effect,
     FluentExpression,
@@ -61,18 +67,24 @@ impl<'src> Error<'src> {
         use ErrorKind::*;
         let label = ariadne::Label::new((filename, self.range.clone()));
         match self.kind {
-            Nom(_) => todo!(),
+            Nom(e) => label.with_message(format!("Parser {:?} failed.", e)),
             UnsetRequirement(r) => label.with_message(format!("Unset requirements {}.", r.into_iter().map(|x| x.to_string()).collect::<Vec<String>>().join(", "))),
             Tag(name) => label.with_message(format!("Expected keyword {}.", name)),
             Many1(name) => label.with_message(format!("Expected one or more {}.", name)),
             FunctionType => todo!(),
-            Name => todo!(),
-            Variable => todo!(),
+            Type => label.with_message("Expected Type."),
+            TypedList => label.with_message("Expected Typed List."),
+            StructureDef => label.with_message("Expected actions."),
+            Name => label.with_message("Expected name."),
+            Variable => label.with_message("Expected variable."),
             Parenthesis => label.with_message("Expected '('."),
-            UnclosedParenthesis => label.with_message("Expected ')'."),
+            UnclosedParenthesis(_) => label.with_message("Expected ')'."),
             PreconditionExpression => label.with_message("Expected precondition expression."),
             Effect => todo!(),
             FluentExpression => todo!(),
+            FunctionTerm => label.with_message("Expected function term."),
+            Literal => label.with_message("Expected litera."),
+            AtomicFormula => label.with_message("Expected atomic formula."),
             GD => label.with_message("Expected GD."),
             Term => label.with_message("Expected name, variable, or function term if :object-fluents is set."),
             FunctionTypedList => todo!(),
@@ -84,13 +96,22 @@ impl<'src> Error<'src> {
         }
     }
     pub fn report(&self, filename:&'static str) -> ariadne::Report<'src, (&'src str, Range<usize>)> {
+        use ErrorKind::*;
         let report = ariadne::Report::<'src, (&'src str, Range<usize>)>::build(ariadne::ReportKind::Error, filename, self.range.start);
         let mut report = report.with_message("Parse error");
         report.add_label(self.make_label(filename));
+        match self.kind {
+            UnclosedParenthesis(pos) => report.add_label(ariadne::Label::new((filename, pos..(pos+1))).with_message("Matching '('")),
+            _ => ()
+        }
         let mut cerror = self;
         while let Some(e) = cerror.chain.as_ref() {
             cerror = e.as_ref();
             report.add_label(cerror.make_label(filename));
+            match cerror.kind {
+                UnclosedParenthesis(pos) => report.add_label(ariadne::Label::new((filename, pos..(pos+1))).with_message("Matching '('")),
+                _ => ()
+            }
         }
         report.finish()
     }

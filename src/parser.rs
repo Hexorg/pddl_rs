@@ -11,7 +11,7 @@ use ast::*;
 
 use nom::{self, 
     sequence::{pair, delimited, terminated, preceded, separated_pair, tuple}, 
-    combinator::{recognize, map, opt, value}, 
+    combinator::{recognize, map, opt, value, cut}, 
     character::complete::{alpha1, multispace0, digit0, digit1}, 
     Parser, 
     InputTakeAtPosition, 
@@ -23,9 +23,8 @@ use nom::{self,
 type IResult<'src, O> = nom::IResult<Input<'src>, O, Error<'src>>;
 
 fn err_name<'src>(ek: ErrorKind<'src>) -> impl FnMut(nom::Err<Error<'src>>) -> nom::Err<Error<'src>> {
-    move |e| 
-        e.map(|Error{input, chain, mut range, mut kind}| {
-            let input = input.unwrap();
+    move |e| e.map(|mut old_e| {
+            let input = old_e.input.unwrap();
             use ErrorKind::*;
             let len = match ek {
                 Nom(_) |
@@ -33,15 +32,21 @@ fn err_name<'src>(ek: ErrorKind<'src>) -> impl FnMut(nom::Err<Error<'src>>) -> n
                 Name |
                 Variable |
                 Term |
+                StructureDef |
+                TypedList |
+                Type |
                 FunctionType |
                 GD |
+                FunctionTerm |
+                Literal |
+                AtomicFormula |
                 PreconditionExpression |
                 FluentExpression |
                 FunctionTypedList |
                 Effect |
                 Tag(_) => input.char_indices().find(|(_, c)| c.is_ascii_whitespace()).and_then(|(p, _)| Some(p)).unwrap_or(0),
                 Many1(_) |
-                UnclosedParenthesis|
+                UnclosedParenthesis(_)|
                 Parenthesis => 1,
                 // Compiler errors:
                 MissmatchedDomain(_) |
@@ -50,11 +55,21 @@ fn err_name<'src>(ek: ErrorKind<'src>) -> impl FnMut(nom::Err<Error<'src>>) -> n
                 UndeclaredVariable |
                 UndefinedType => panic!(),
             };
-            if let ErrorKind::Nom(_) = kind {
-                range = range.start..(range.start+len);
-                kind = ek;
+            if let ErrorKind::Nom(_) = old_e.kind {
+                let new_range = old_e.range.start..(old_e.range.start+len);
+                old_e.kind = ek;
+                old_e.range = new_range;
+                old_e
+            } else if old_e.kind != ek {
+                let mut old_range = old_e.range.clone();
+                match old_e.kind {
+                    UnclosedParenthesis(pos) => old_range.start = pos,
+                    _ => (),
+                }
+                Error{chain:Some(Box::new(old_e)), input:Some(input), kind:ek, range:old_range}
+            } else {
+                old_e
             }
-            Error{chain, input:Some(input), kind, range}
     })
 }
 
@@ -83,14 +98,20 @@ pub fn alt_check_requirements<'src, O, F>(mut parser:F, required:EnumSet<Require
     F: Parser<Input<'src>, O, Error<'src>> {
         move |input: Input<'src>| {
             if !(input.requirements.is_superset(required) ||(!or.is_empty() && input.requirements.is_superset(or))) {
+                let range = match parser.parse(input.clone()) {
+                    Ok((i, _)) => input.input_pos..i.input_pos,
+                    Err(nom::Err::Error(e)) |
+                    Err(nom::Err::Failure(e)) => e.range.clone(),
+                    _ => input.input_pos..(input.input_pos+input.input_len())
+                };
                 Err(err_name(ErrorKind::UnsetRequirement(required))(nom::Err::Error(Error{
                     input:Some(input.src), 
                     kind: ErrorKind::UnsetRequirement(required), 
                     chain:None, 
-                    range: input.input_pos..input.input_pos
+                    range
                 })))
             } else {
-                parser.parse(input.clone())
+                parser.parse(input)
             }
         }
 }
@@ -141,28 +162,26 @@ pub fn char(c: char) -> impl Fn(Input) -> IResult<Spanned<char>> {
     move |i| nom::character::complete::char(c)(i).map(|(i, o)| {let end = i.input_pos; (i, (end-1..end, o))})
 }
 
-// pub fn delimited<'src, O1, O2, O3, F, G, H>(mut first: F, mut second: G, mut third: H) -> impl FnMut(Input<'src>) -> IResult<O2>
-//   where
-//   O1:SpannedAst + 'src,
-//   O2:SpannedAstMut + 'src,
-//   O2:SpannedAst,
-//   F: Parser<Input<'src>, O1, Error<'src>>,
-//   G: Parser<Input<'src>, O2, Error<'src>>,
-//   H: Parser<Input<'src>, O3, Error<'src>> {
-//     move |input: Input<'src>| {
-//       let (input, _) = first.parse(input)?;
-//       let (input, o2) = second.parse(input)?;
-//       third.parse(input).map(|(i, _)| (i, o2))
-//     }
-//   }
-
 fn parens<'src, O2, G>(mut parser:G) -> impl FnMut(Input<'src>) -> IResult<O2> 
 where 
     G: Parser<Input<'src>, O2, Error<'src>> {
     move |input| {
+        let open_paren_pos = input.input_pos;
         let (i, _) = terminated(char('('), ignore)(input).map_err(err_name(ErrorKind::Parenthesis))?; 
         let (i, o) = parser.parse(i)?;
-        let (i, _) = terminated(char(')'), ignore)(i).map_err(err_name(ErrorKind::UnclosedParenthesis))?;
+        let (i, _) = terminated(cut(char(')')), ignore)(i).map_err(err_name(ErrorKind::UnclosedParenthesis(open_paren_pos)))?;
+        Ok((i, o))
+    }
+}
+
+fn parens_alt<'src, O2, G>(mut parser:G) -> impl FnMut(Input<'src>) -> IResult<O2> 
+where 
+    G: Parser<Input<'src>, O2, Error<'src>> {
+    move |input| {
+        let open_paren_pos = input.input_pos;
+        let (i, _) = terminated(char('('), ignore)(input).map_err(err_name(ErrorKind::Parenthesis))?; 
+        let (i, o) = parser.parse(i)?;
+        let (i, _) = terminated(char(')'), ignore)(i).map_err(err_name(ErrorKind::UnclosedParenthesis(open_paren_pos)))?;
         Ok((i, o))
     }
 }
@@ -224,7 +243,7 @@ pub fn parse_domain<'src>(src:&'src str) -> Result<Domain<'src>, Error<'src>> {
 fn require_def(input:Input) -> IResult<EnumSet<Requirement>> {
     parens(preceded(
         tag(":requirements"), 
-        fold_many1(require_key, || EnumSet::EMPTY, |acc,kind| acc | kind)
+        cut(fold_many1(require_key, || EnumSet::EMPTY, |acc,kind| acc | kind))
     ))(input).map(|(mut i, o)| {i.requirements = o; (i, o)})
 }
 
@@ -252,27 +271,23 @@ fn require_key(input:Input) -> IResult<Requirement> {
 }
 
 fn types_def(input:Input) -> IResult<Vec<List>> {
-    let r = input.requirements;
-    let input_pos = input.input_pos;
-    let result = parens(preceded(
+    parens(preceded(
         check_requirements(tag(":types"), enum_set!(Typing), enum_set!()), 
-        typed_list(name)
-    ))(input);
-    input_pos;
-    result
+        cut(typed_list(name))
+    ))(input)
 }
 
 fn constants_def(input:Input) -> IResult<Vec<List>> {
     parens(preceded(
         tag(":constants"), 
-        typed_list(name)
+        cut(typed_list(name))
     ))(input)
 }
 
 fn predicates_def(input:Input) -> IResult<Vec<AtomicFSkeleton>> {
     parens(preceded(
         tag(":predicates"), 
-        many1(atomic_function_skeleton, "atomic function skeleton")
+        cut(many1(atomic_function_skeleton, "atomic function skeleton"))
     ))(input)
 }
 
@@ -295,7 +310,7 @@ use name as function_symbol;
 fn functions_def(input:Input) -> IResult<Vec<FunctionTypedList>> {
     parens(preceded(
         check_requirements(tag(":functions"), enum_set!(ObjectFluents | NumericFluents), enum_set!(ActionCosts)), 
-        many1(function_typed_list, "function typed list")
+        cut(many1(function_typed_list, "function typed list"))
     ))(input)
 }
 
@@ -303,11 +318,10 @@ fn function_typed_list(input:Input) -> IResult<FunctionTypedList> {
     alt((
         map(separated_pair(many1(atomic_function_skeleton, "atomic function skeleton"), minus_separated, function_type), |(functions, kind)| FunctionTypedList{functions, kind}),
         map(check_requirements(many1(atomic_function_skeleton, "atomic function skeleton"), enum_set!(NumericFluents), enum_set!()), |functions| FunctionTypedList{functions, kind:FunctionType::None})
-        ))(input) //.map_err(err_name(ErrorKind::FunctionTypedList))
+        ))(input).map_err(err_name(ErrorKind::FunctionTypedList))
 }
 
 fn function_type(input:Input) -> IResult<FunctionType> {
-    let src = input.src.chars().take(10).collect::<String>();
     alt((
         map(alt_check_requirements(digit0, enum_set!(NumericFluents), enum_set!()), |o:Input| FunctionType::Numeric((o.input_pos..(o.input_pos+o.input_len()), i64::from_str_radix(o.src, 10).unwrap()))),
         map(check_requirements(r#type, enum_set!(Typing | ObjectFluents), enum_set!(ActionCosts)), |t| FunctionType::Typed(t))
@@ -317,7 +331,7 @@ fn function_type(input:Input) -> IResult<FunctionType> {
 fn constraints(input:Input) -> IResult<ConstraintGD> {
     parens(preceded(
         check_requirements(tag(":constraints"), enum_set!(Constraints), enum_set!()), 
-        con_gd
+        cut(con_gd)
     ))(input)
 }
 
@@ -326,7 +340,7 @@ fn structure_def(input:Input) -> IResult<Action> {
         map(action_def, |a| Action::Basic(a)),
         map(durative_action_def, |a| Action::Durative(a)),
         // map(derived_def, |a| Action::Derived(a))
-    ))(input)
+    ))(input).map_err(err_name(ErrorKind::StructureDef))
 }
 
 
@@ -337,7 +351,7 @@ where
             many1(map(separated_pair(many1(parser, "name or variable"), check_requirements(minus_separated, enum_set!(Typing), enum_set!()), r#type), |(items, kind)| List{items, kind}), "typed list"), 
             many1(map(many0(parser), |items| List{items, kind:Type::None}), "list"),
             map(many0(parser), |items| vec![List{items, kind:Type::None}])
-        ))(input)
+        ))(input).map_err(err_name(ErrorKind::TypedList))
 }
 
 use name as primitive_type;
@@ -345,8 +359,8 @@ use name as primitive_type;
 fn r#type(input:Input) -> IResult<Type> {
     alt((
         map(primitive_type, |o| Type::Exact(o)),
-        map(preceded(delimited(multispace0, tag("either"), multispace0), many1(primitive_type, "primitive type")), |vec| Type::Either(vec))
-    ))(input)
+        map(preceded(delimited(multispace0, tag("either"), multispace0), cut(many1(primitive_type, "primitive type"))), |vec| Type::Either(vec))
+    ))(input).map_err(err_name(ErrorKind::Type))
 }
 
 fn empty_or<'src, O2, G>(parser:G) -> impl FnMut(Input<'src>) -> IResult<Option<O2>> 
@@ -361,10 +375,10 @@ where
 
 fn action_def(input:Input) -> IResult<BasicAction> {
     map(parens(tuple((
-        preceded(tag(":action"), action_symbol),
-        preceded(tag(":parameters"), parens(typed_list(variable))),
-        map(opt(preceded(tag(":precondition"), empty_or(pre_gd))), |o| o.and_then(|f| f)),
-        map(opt(preceded(tag(":effect"), empty_or(effect))), |o| o.and_then(|f| f)),
+        preceded(tag(":action"), cut(action_symbol)),
+        preceded(tag(":parameters"), cut(parens(typed_list(variable)))),
+        map(opt(preceded(tag(":precondition"), cut(empty_or(pre_gd)))), |o| o.and_then(|f| f)),
+        map(opt(preceded(tag(":effect"), cut(empty_or(effect)))), |o| o.and_then(|f| f)),
     ))), |(name, parameters, precondition, effect)| BasicAction{name, parameters, precondition, effect})(input)
 }
 
@@ -374,10 +388,10 @@ where
     G: FnMut(Input<'src>) -> IResult<O2>+Copy {
         parens(preceded(
             tag("forall"), 
-            map(pair(
+            cut(map(pair(
                 parens(typed_list(variable)),
                 parser
-            ), |(variables, gd)| Forall{variables, gd:Box::new(gd)})
+            ), |(variables, gd)| Forall{variables, gd:Box::new(gd)}))
         ))
 }
 
@@ -387,10 +401,10 @@ where
     G: FnMut(Input<'src>) -> IResult<O2>+Copy {
         parens(preceded(
             tag("exists"), 
-            map(pair(
+            cut(map(pair(
                 parens(typed_list(variable)),
                 parser
-            ), |(variables, gd)| Forall{variables, gd:Box::new(gd)})
+            ), |(variables, gd)| Forall{variables, gd:Box::new(gd)}))
         ))
 }
 
@@ -400,20 +414,20 @@ where
     G: FnMut(Input<'src>) -> IResult<O2> {
         parens(preceded(
             tag("preference"), 
-            map(pair(
+            cut(map(pair(
                 opt(pref_name),
                 parser
-            ), |(name, gd)| Preference{name, gd})
+            ), |(name, gd)| Preference{name, gd}))
         ))
 }
 
 fn pre_gd(input:Input) -> IResult<PreconditionExpr> {
     alt((
-        map(parens(preceded(tag("and"), many0(pre_gd))), |vec| PreconditionExpr::And(vec)),
+        map(parens(preceded(tag("and"), cut(many0(pre_gd)))), |vec| PreconditionExpr::And(vec)),
         map(forall(pre_gd), |forall| PreconditionExpr::Forall(forall)),
         map(preference(gd), |pref| PreconditionExpr::Preference(pref)),
         map(gd, |gd| PreconditionExpr::GD(gd)),
-    ))(input) //.map_err(err_name(ErrorKind::PreconditionExpression))
+    ))(input).map_err(err_name(ErrorKind::PreconditionExpression))
 }
 
 use name as pref_name;
@@ -439,20 +453,20 @@ fn literal<'src, O2, G>(parser:G) -> impl FnMut(Input<'src>) -> IResult<Negative
 where 
     O2:'src,
     G: Copy+FnMut(Input<'src>) -> IResult<O2> {
-        alt((
-            map(parens(preceded(tag("not"), atomic_formula(parser))), |af| NegativeFormula::Not(af)),
+        move |i|alt((
+            map(parens(preceded(tag("not"), cut(atomic_formula(parser)))), |af| NegativeFormula::Not(af)),
             map(atomic_formula(parser), |af| NegativeFormula::Direct(af))
-        ))
+        ))(i).map_err(err_name(ErrorKind::Literal))
 }
 
 fn atomic_formula<'src, O2, G>(parser:G) -> impl FnMut(Input<'src>) -> IResult<AtomicFormula<O2>> 
 where 
     O2: 'src,
     G: FnMut(Input<'src>) -> IResult<O2>+Copy {
-        alt((
-            map(parens(pair(predicate, many0(parser))), |(predicate, vec)| AtomicFormula::Predicate(predicate, vec)),
+        move |i|alt((
+            map(parens_alt(pair(predicate, many0(parser))), |(predicate, vec)| AtomicFormula::Predicate(predicate, vec)),
             map(parens(preceded(tag("="), pair(parser, parser))), |(left, right)| AtomicFormula::Equality(left, right))
-        ))
+        ))(i).map_err(err_name(ErrorKind::AtomicFormula))
 }
 
 fn term(input:Input) -> IResult<Term> {
@@ -460,26 +474,26 @@ fn term(input:Input) -> IResult<Term> {
         map(variable, |o| Term::Variable(o)),
         map(name, |o| Term::Name(o)), 
         alt_check_requirements(map(function_term, |o| Term::Function(o)), enum_set!(ObjectFluents), enum_set!(ActionCosts)),
-    ))(input) //.map_err(err_name(ErrorKind::Term))
+    ))(input).map_err(err_name(ErrorKind::Term))
 }
 
 fn function_term(input:Input) -> IResult<FunctionTerm> {
-        check_requirements(parens(map(
+        check_requirements(parens_alt(map(
             pair(function_symbol, many0(term)), 
             |(name, terms)| FunctionTerm{name, terms})),
-            enum_set!(ObjectFluents), enum_set!(ActionCosts))(input)
+            enum_set!(ObjectFluents), enum_set!(ActionCosts))(input).map_err(err_name(ErrorKind::FunctionTerm))
 }
 
 fn f_exp(input:Input) -> IResult<Spanned<FluentExpression>> {
     alt((
         map(digit0, |o:Input| {let src = o.src; (o.into(), FluentExpression::Number(i64::from_str_radix(src, 10).unwrap()))}),
-        map(parens(preceded(tag("-"), f_exp)), |(r, args)| (r.clone(), FluentExpression::Negate(Box::new((r, args))))),
-        map(parens(preceded(tag("-"), pair(f_exp, f_exp))), |args| (args.0.0.start..args.1.0.end, FluentExpression::Subtract(Box::new(args)))),
-        map(parens(preceded(tag("/"), pair(f_exp, f_exp))), |args| (args.0.0.start..args.1.0.end, FluentExpression::Divide(Box::new(args)))),
-        map(parens(preceded(tag("+"), many1(f_exp, "fluent expression"))), |args| (args.range(), FluentExpression::Add(args))),
-        map(parens(preceded(tag("*"), many1(f_exp, "fluent expression"))), |args| (args.range(), FluentExpression::Multiply(args))),
+        map(parens(preceded(tag("-"), cut(f_exp))), |(r, args)| (r.clone(), FluentExpression::Negate(Box::new((r, args))))),
+        map(parens(preceded(tag("-"), cut(pair(f_exp, f_exp)))), |args| (args.0.0.start..args.1.0.end, FluentExpression::Subtract(Box::new(args)))),
+        map(parens(preceded(tag("/"), cut(pair(f_exp, f_exp)))), |args| (args.0.0.start..args.1.0.end, FluentExpression::Divide(Box::new(args)))),
+        map(parens(preceded(tag("+"), cut(many1(f_exp, "fluent expression")))), |args| (args.range(), FluentExpression::Add(args))),
+        map(parens(preceded(tag("*"), cut(many1(f_exp, "fluent expression")))), |args| (args.range(), FluentExpression::Multiply(args))),
         map(f_head, |f| (f.range(), FluentExpression::Function(f)))
-    ))(input) //.map_err(err_name(ErrorKind::FluentExpression))
+    ))(input).map_err(err_name(ErrorKind::FluentExpression))
 }
 
 fn f_head(input:Input) -> IResult<FunctionTerm> {
@@ -498,32 +512,32 @@ fn name(input:Input) -> IResult<Name> {
 
 fn effect(input:Input) -> IResult<Effect> {
     alt((
-        map(parens(preceded(tag("and"), many0(effect))), |vec| Effect::And(vec)),
+        map(parens(preceded(tag("and"), cut(many0(effect)))), |vec| Effect::And(vec)),
         map(forall(effect), |forall| Effect::Forall(forall)),
-        map(parens(preceded(tag("when"), pair(gd, effect))), |(gd, effect)| Effect::When(When{gd, effect:Box::new(effect)})),
+        map(parens(preceded(tag("when"), cut(pair(gd, effect)))), |(gd, effect)| Effect::When(When{gd, effect:Box::new(effect)})),
         map(literal(term), |l| Effect::NegativeFormula(l)),
-        map(parens(preceded(tag("scale-up"), pair(f_head, f_exp))), |(t, e)| Effect::ScaleUp(t, e)),
-        map(parens(preceded(tag("scale-down"), pair(f_head, f_exp))), |(t, e)| Effect::ScaleDown(t, e)),
-        map(parens(preceded(tag("increase"), pair(f_head, f_exp))), |(t, e)| Effect::Increase(t, e)),
-        map(parens(preceded(tag("decrease"), pair(f_head, f_exp))), |(t, e)| Effect::Decrease(t, e)),
+        map(parens(preceded(tag("scale-up"), cut(pair(f_head, f_exp)))), |(t, e)| Effect::ScaleUp(t, e)),
+        map(parens(preceded(tag("scale-down"), cut(pair(f_head, f_exp)))), |(t, e)| Effect::ScaleDown(t, e)),
+        map(parens(preceded(tag("increase"), cut(pair(f_head, f_exp)))), |(t, e)| Effect::Increase(t, e)),
+        map(parens(preceded(tag("decrease"), cut(pair(f_head, f_exp)))), |(t, e)| Effect::Decrease(t, e)),
         map(parens(preceded(tag("assign"), pair(f_head, f_exp))), |(t, e)| Effect::Assign(t, e)),
         map(parens(preceded(tag("assign"), pair(function_term, term))), |(t, e)| Effect::AssignTerm(t, e)),
         map(parens(preceded(tag("assign"), pair(f_head, tag("undefined")))), |(t, _)| Effect::AssignUndefined(t)),
-    ))(input) //.map_err(err_name(ErrorKind::Effect))
+    ))(input).map_err(err_name(ErrorKind::Effect))
 }
 
 fn durative_action_def(input:Input) -> IResult<DurativeAction> {
     map(parens(tuple((
         tag(":durative-action"),
-        da_symbol,
+        cut(da_symbol),
         tag(":parameters"),
-        parens(typed_list(variable)),
+        cut(parens(typed_list(variable))),
         tag(":duration"),
-        duration_contraint,
+        cut(duration_contraint),
         tag(":condition"),
-        empty_or(da_gd),
+        cut(empty_or(da_gd)),
         tag(":effect"),
-        empty_or(da_effect)
+        cut(empty_or(da_effect))
     ))), |((), name, (), parameters, (), duration, (), condition, (), effect)| DurativeAction{ name, 
         parameters, 
         duration, 
@@ -537,44 +551,44 @@ fn da_gd(input:Input) -> IResult<DurationGD> {
     alt((
         map(timed_gd, |tgd| DurationGD::GD(tgd)),
         map(preference(timed_gd), |pref| DurationGD::Preference(pref)),
-        map(parens(preceded(tag("and"), many0(da_gd))), |vec| DurationGD::And(vec)),
+        map(parens(preceded(tag("and"), cut(many0(da_gd)))), |vec| DurationGD::And(vec)),
         map(forall(da_gd), |forall| DurationGD::Forall(forall)),
     ))(input)
 }
 
 fn timed_gd(input:Input) -> IResult<TimedGD> {
     parens(alt((
-        map(pair(tag("at start"), gd), |((), gd)| TimedGD::AtStart(gd)),
-        map(pair(tag("at end"), gd), |((), gd)| TimedGD::AtEnd(gd)),
-        map(pair(tag("over all"), gd), |((), gd)| TimedGD::OverAll(gd))
+        map(pair(tag("at start"), cut(gd)), |((), gd)| TimedGD::AtStart(gd)),
+        map(pair(tag("at end"), cut(gd)), |((), gd)| TimedGD::AtEnd(gd)),
+        map(pair(tag("over all"), cut(gd)), |((), gd)| TimedGD::OverAll(gd))
     )))(input)
 }
 
 fn duration_contraint(input:Input) -> IResult<DurationConstraint> {
     parens(alt((
-        map(pair(tag("and"), many0(duration_contraint)), |((), vec)| DurationConstraint::And(vec)),
+        map(pair(tag("and"), cut(many0(duration_contraint))), |((), vec)| DurationConstraint::And(vec)),
         map(tag("()"), |_| DurationConstraint::None),
-        map(pair(tag("<= ?duration"), f_exp), |((), exp)| DurationConstraint::LessThanOrEquals(exp)),
-        map(pair(tag(">= ?duration"), f_exp), |((), exp)| DurationConstraint::GreaterOrEquals(exp)),
-        map(pair(tag("= ?duration"), f_exp), |((), exp)| DurationConstraint::Equals(exp)),
-        map(pair(tag("at start"), duration_contraint), |((), d)| DurationConstraint::AtStart(Box::new(d))),
-        map(pair(tag("at end"), duration_contraint), |((), d)| DurationConstraint::AtEnd(Box::new(d))),
+        map(pair(tag("<= ?duration"), cut(f_exp)), |((), exp)| DurationConstraint::LessThanOrEquals(exp)),
+        map(pair(tag(">= ?duration"), cut(f_exp)), |((), exp)| DurationConstraint::GreaterOrEquals(exp)),
+        map(pair(tag("= ?duration"), cut(f_exp)), |((), exp)| DurationConstraint::Equals(exp)),
+        map(pair(tag("at start"), cut(duration_contraint)), |((), d)| DurationConstraint::AtStart(Box::new(d))),
+        map(pair(tag("at end"), cut(duration_contraint)), |((), d)| DurationConstraint::AtEnd(Box::new(d))),
     )))(input)
 }
 
 fn da_effect(input:Input) -> IResult<DurationEffect> {
     parens(alt((
-        map(pair(tag("and"), many0(da_effect)), |((), vec)| DurationEffect::And(vec)),
+        map(pair(tag("and"), cut(many0(da_effect))), |((), vec)| DurationEffect::And(vec)),
         map(timed_effect, |gd| DurationEffect::GD(gd)),
         map(forall(da_effect), |forall| DurationEffect::Forall(forall)),
-        map(parens(preceded(tag("when"), pair(da_gd, timed_effect))), |(gd, effect)| DurationEffect::When(When{gd, effect:Box::new(effect)})),
+        map(parens(preceded(tag("when"), cut(pair(da_gd, timed_effect)))), |(gd, effect)| DurationEffect::When(When{gd, effect:Box::new(effect)})),
     )))(input)
 }
 
 fn timed_effect(input:Input) -> IResult<TimedEffect> {
     alt((
-        map(pair(tag("at start"), effect), |((), e)| TimedEffect::AtStart(e)),
-        map(pair(tag("at end"), effect), |((), e)| TimedEffect::AtEnd(e)),
+        map(pair(tag("at start"), cut(effect)), |((), e)| TimedEffect::AtStart(e)),
+        map(pair(tag("at end"), cut(effect)), |((), e)| TimedEffect::AtEnd(e)),
         map(effect, |e| TimedEffect::Effect(e))
     ))(input)
 }
@@ -601,11 +615,11 @@ pub fn parse_problem<'src>(src:&'src str, requirements:EnumSet<Requirement>) -> 
         parens(pair(tag("problem"), name)),
         parens(pair(tag(":domain"), name)),
         opt(require_def),
-        opt(parens(pair(tag(":objects"), typed_list(name)))),
-        opt(parens(pair(tag(":init"), many0(init_el)))),
+        opt(parens(pair(tag(":objects"), cut(typed_list(name))))),
+        opt(parens(pair(tag(":init"), cut(many0(init_el))))),
         parens(pair(tag(":goal"), pre_gd)),
-        opt(parens(pair(tag(":constraints"), pref_con_gd))),
-        opt(parens(pair(tag(":metric"), metric_spec)))
+        opt(parens(pair(tag(":constraints"), cut(pref_con_gd)))),
+        opt(parens(pair(tag(":metric"), cut(metric_spec))))
     ))), |((), ((), name), ((), domain), requirements, objects, init, ((), goal), constraints, metric)| {
     let requirements = requirements.unwrap_or(EnumSet::EMPTY);
     let objects = objects.and_then(|((), o)| Some(o)).unwrap_or_default();
@@ -630,16 +644,16 @@ pub fn parse_problem<'src>(src:&'src str, requirements:EnumSet<Requirement>) -> 
 fn init_el(input:Input)->IResult<Init> {
     alt((
         map(literal(name), |l| Init::AtomicFormula(l)),
-        map(parens(tuple((tag("at"), digit1, literal(name)))),
+        map(parens(tuple((tag("at"), cut(digit1), cut(literal(name))))),
             |((), Input{src,..}, literal)| Init::At(i64::from_str_radix(src, 10).unwrap(), literal)),
-        map(parens(tuple((tag("="), function_term, digit1))), |((), term, Input{src,..})| Init::Equals(term, i64::from_str_radix(src, 10).unwrap())),
-        map(parens(tuple((tag("="), function_term, name))), |((), term, name)| Init::Is(term, name))
+        map(parens(tuple((tag("="), cut(function_term), cut(digit1)))), |((), term, Input{src,..})| Init::Equals(term, i64::from_str_radix(src, 10).unwrap())),
+        map(parens(tuple((tag("="), cut(function_term), cut(name)))), |((), term, name)| Init::Is(term, name))
     ))(input)
 }
 
 fn pref_con_gd(input:Input) -> IResult<PrefConstraintGD> {
     alt((
-        map(parens(pair(tag("and"), many0(pref_con_gd))), |((), vec)| PrefConstraintGD::And(vec)),
+        map(parens(pair(tag("and"), cut(many0(pref_con_gd)))), |((), vec)| PrefConstraintGD::And(vec)),
         map(forall(pref_con_gd), |forall| PrefConstraintGD::Forall(forall)),
         map(preference(con_gd), |pref| PrefConstraintGD::Preference(pref)),
         map(con_gd, |gd| PrefConstraintGD::GD(gd))
@@ -648,32 +662,32 @@ fn pref_con_gd(input:Input) -> IResult<PrefConstraintGD> {
 
 fn con_gd(input:Input) -> IResult<ConstraintGD> {
     alt((
-        map(parens(preceded(tag("and"), many0(con_gd))), |f| ConstraintGD::And(f)),
+        map(parens(preceded(tag("and"), cut(many0(con_gd)))), |f| ConstraintGD::And(f)),
         map(forall(con_gd), |forall| ConstraintGD::Forall(forall)),
-        map(pair(tag("at end"), gd), |((), gd)| ConstraintGD::AtEnd(gd)),
-        map(pair(tag("always"), gd), |((), gd)| ConstraintGD::Always(gd)),
-        map(pair(tag("sometime"), gd), |((), gd)| ConstraintGD::Sometime(gd)),
-        map(tuple((tag("within"), digit1, gd)), |((), number, gd)| ConstraintGD::Within(i64::from_str_radix(number.src, 10).unwrap(), gd)),
-        map(pair(tag("at-most-once"), gd), |((), gd)| ConstraintGD::AtMostOnce(gd)),
-        map(tuple((tag("sometime-after"), gd, gd)), |((), left, right)| ConstraintGD::SometimeAfter(left, right)),
-        map(tuple((tag("sometime-before"), gd, gd)), |((), left, right)| ConstraintGD::SometimeBefore(left, right)),
-        map(tuple((tag("always-within"), digit1, gd, gd)), |((), number, left, right)| ConstraintGD::AlwaysWithin(i64::from_str_radix(number.src, 10).unwrap(), left, right)),
-        map(tuple((tag("hold-during"), digit1, digit1, gd)), |((), val, res, gd)| ConstraintGD::HoldDuring(i64::from_str_radix(val.src, 10).unwrap(), i64::from_str_radix(res.src, 10).unwrap(), gd)),
-        map(tuple((tag("hold-after"), digit1, gd)), |((), number, gd)| ConstraintGD::HoldAfter(i64::from_str_radix(number.src, 10).unwrap(), gd))
+        map(pair(tag("at end"), cut(gd)), |((), gd)| ConstraintGD::AtEnd(gd)),
+        map(pair(tag("always"), cut(gd)), |((), gd)| ConstraintGD::Always(gd)),
+        map(pair(tag("sometime"), cut(gd)), |((), gd)| ConstraintGD::Sometime(gd)),
+        map(tuple((tag("within"), cut(digit1), cut(gd))), |((), number, gd)| ConstraintGD::Within(i64::from_str_radix(number.src, 10).unwrap(), gd)),
+        map(pair(tag("at-most-once"), cut(gd)), |((), gd)| ConstraintGD::AtMostOnce(gd)),
+        map(tuple((tag("sometime-after"), cut(gd), cut(gd))), |((), left, right)| ConstraintGD::SometimeAfter(left, right)),
+        map(tuple((tag("sometime-before"), cut(gd), cut(gd))), |((), left, right)| ConstraintGD::SometimeBefore(left, right)),
+        map(tuple((tag("always-within"), cut(digit1), cut(gd), cut(gd))), |((), number, left, right)| ConstraintGD::AlwaysWithin(i64::from_str_radix(number.src, 10).unwrap(), left, right)),
+        map(tuple((tag("hold-during"), cut(digit1), cut(digit1), cut(gd))), |((), val, res, gd)| ConstraintGD::HoldDuring(i64::from_str_radix(val.src, 10).unwrap(), i64::from_str_radix(res.src, 10).unwrap(), gd)),
+        map(tuple((tag("hold-after"), cut(digit1), cut(gd))), |((), number, gd)| ConstraintGD::HoldAfter(i64::from_str_radix(number.src, 10).unwrap(), gd))
     ))(input)
 }
 
 fn metric_spec(input:Input) -> IResult<Metric> {
     alt((
-        map(pair(tag("minimize"), metric_f_exp), |((), mfe)| Metric::Minimize(mfe)),
-        map(pair(tag("maximize"), metric_f_exp), |((), mfe)| Metric::Maximize(mfe)),
+        map(pair(tag("minimize"), cut(metric_f_exp)), |((), mfe)| Metric::Minimize(mfe)),
+        map(pair(tag("maximize"), cut(metric_f_exp)), |((), mfe)| Metric::Maximize(mfe)),
     ))(input)
 }
 
 fn metric_f_exp(input:Input) -> IResult<MetricFluentExpr> {
     alt((
         map(tag("total-time"), |_| MetricFluentExpr::TotalTime()),
-        map(parens(pair(tag("is-violated"), name)), |((), name)| MetricFluentExpr::IsViolated(name)),
+        map(parens(pair(tag("is-violated"), cut(name))), |((), name)| MetricFluentExpr::IsViolated(name)),
         map(f_exp, |f| MetricFluentExpr::FExpr(f))
     ))(input)
 }
@@ -698,6 +712,9 @@ mod tests {
         assert_eq!(variable(Input::new("?test me")), 
             Ok((Input{src:"me", input_pos:6, requirements:EnumSet::EMPTY}, (0..5,"test")
         )));
+        assert_eq!(parens(name)(Input::new("(test;comment\n)")), 
+            Ok((Input{src:"", input_pos:15, requirements:EnumSet::EMPTY}, (1..5, "test"))
+        ));
 
         assert_eq!(pair(name, variable)(Input::new("hello ?world")), 
             Ok((Input{src:"", input_pos:12, requirements:EnumSet::EMPTY}, ((0..5, "hello"), (6..12, "world")))));
@@ -706,10 +723,10 @@ mod tests {
             Ok((Input{src:"", input_pos:13, requirements:enum_set!(ObjectFluents)}, 
             Term::Function(FunctionTerm{name:(1..5, "test"), terms:vec![Term::Variable((6..10, "one"))]})
         )));
-        let test = Error { input: Some("(test ?one)  "), kind:ErrorKind::UnsetRequirement(enum_set!(ObjectFluents)), chain: None, range: 0..13 };
+        let test = Error { input: Some("(test ?one)  "), kind: ErrorKind::Term, chain: Some(Box::new(Error { input: Some("(test ?one)  "), kind:ErrorKind::UnsetRequirement(enum_set!(ObjectFluents)), chain: None, range: 0..13 })), range: 0..5 };
         // test.clone().report("stdio").eprint(("stdio", ariadne::Source::from("(test ?one)  ")));
         assert_eq!(term(Input::new("(test ?one)  ")), 
-            Err(nom::Err::Failure(test)));
+            Err(nom::Err::Error(test)));
         assert_eq!(term(Input::new("?hello")), 
             Ok((Input{src:"", input_pos:6, requirements:EnumSet::EMPTY}, Term::Variable((0..6, "hello")))));
         assert_eq!(typed_list(name)(Input{src:"one two - object", input_pos:0, requirements:enum_set!(Typing)}), 
@@ -740,6 +757,11 @@ mod tests {
     #[test]
     fn test_gd() {
         assert_eq!(gd(Input::new("(and (ball ?obj))")), Ok((Input{src:"", input_pos:17, requirements:EnumSet::EMPTY}, GD::And(vec![GD::AtomicFormula(AtomicFormula::Predicate((6..10, "ball"), vec![Term::Variable((11..15, "obj"))]))]))))
+    }
+
+    #[test]
+    fn test_effect() {
+        assert!(empty_or(effect)(Input::new("(and (at-robby ?to) (not (at-robby ?from)))")).is_ok())
     }
 
 }

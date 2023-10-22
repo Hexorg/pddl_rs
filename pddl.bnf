@@ -1,3 +1,0 @@
-<domain> ::= '(define (domain ' <name> ') '[<require-def>][<typing-def>])
-<require-def> := (:requirements <require-key>+)
-<require-key> ::= ':strips' | ':typing'
