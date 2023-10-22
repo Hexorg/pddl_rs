@@ -1,4 +1,6 @@
+[![LICENSE](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Build status](https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml/badge.svg)](https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml)
+[![crates.io Version](https://img.shields.io/crates/v/pddl_rs.svg)](https://crates.io/crates/pddl_rs)
 
 # pddl_rs
 

@@ -138,14 +138,16 @@ mod test {
 
     fn full_search(domain_filename:&'static str, problem_filename:&'static str) -> std::io::Result<Vec<usize>> {
         use std::{fs, env, path::Path};
-        let (domain_src, problem_src) = match env::var("CARGO_MANIFEST_DIR") {
-            Ok(path) => { let p = Path::new(&path);
-                let domain_src = fs::read_to_string(p.join(domain_filename))?;
-                let problem_src = fs::read_to_string(p.join(problem_filename))?;
-                (domain_src, problem_src)
+        let workspace_path = match env::var("GITHUB_WORKSPACE ") {
+            Ok(path) => path,
+            Err(_) => match env::var("CARGO_MANIFEST_DIR") {
+                Ok(path) => path,
+                Err(_) => panic!("Neither GITHUB_WORKSPACE nor CARGO_MANIFEST_DIR is unset."),
             }
-            Err(_) => panic!("CARGO_MANIFEST_DIR is unset."),
         };
+        let p = Path::new(&workspace_path);
+        let domain_src = fs::read_to_string(p.join(domain_filename))?;
+        let problem_src = fs::read_to_string(p.join(problem_filename))?;
         let domain = match parse_domain(&domain_src) {
             Err(e) => {e.report(domain_filename).eprint((domain_filename, ariadne::Source::from(&domain_src)))?; panic!() },
             Ok(d) => d,
