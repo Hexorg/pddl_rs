@@ -183,6 +183,7 @@ pub struct Preference<'src, T> {
 
 pub type Exists<'src, T> = Forall<'src, T>;
 
+/// AST Representation of preconditions.
 #[derive(PartialEq, Debug)]
 pub enum PreconditionExpr<'src> {
     And(Vec<PreconditionExpr<'src>>),
@@ -321,6 +322,10 @@ pub enum Metric<'src> {
     Maximize(MetricFluentExpr<'src>),
 }
 
+/// Action representation of PDDL 3.1. It's an enum with 3 variants:
+/// * Basic([`BasicAction`])
+/// * Durative([`DurativeAction`])
+/// * Derived([`DerivedAction`])
 #[derive(PartialEq, Debug)]
 pub enum Action<'src> {
     Basic(BasicAction<'src>),
@@ -328,11 +333,17 @@ pub enum Action<'src> {
     Derived(AtomicFSkeleton<'src>, GD<'src>), // :derived−predicates
 }
 
+/// Basic PDDL Action
 #[derive(PartialEq, Debug)]
 pub struct BasicAction<'src> {
+    /// Human-readable name of this action.
     pub name: Name<'src>,
+    /// Action parameters - similar to function parameters in programming
+    /// They can be typed or not, depending on domain requirements.
     pub parameters: Vec<List<'src>>,
+    /// AST representation of basic preconditions.
     pub precondition: Option<PreconditionExpr<'src>>,
+    /// AST representation of basic effects.
     pub effect: Option<Effect<'src>>,
 }
 
