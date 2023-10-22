@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2021"
 description = "PDDL parser"
 license = "MIT"
+repository = "https://github.com/Hexorg/pddl_rs/"
 
 [lib]
 name = "pddl_rs"

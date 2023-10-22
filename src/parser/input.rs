@@ -1,18 +1,24 @@
-use enumset::EnumSet;
-use std::{str::{CharIndices, Chars}, ops::{RangeFrom, RangeTo}};
-use nom::{InputLength, InputIter, InputTake, UnspecializedInput, Compare, Slice, Offset};
 use super::ast::{Requirement, SpannedAst};
-
+use enumset::EnumSet;
+use nom::{Compare, InputIter, InputLength, InputTake, Offset, Slice, UnspecializedInput};
+use std::{
+    ops::{RangeFrom, RangeTo},
+    str::{CharIndices, Chars},
+};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Input<'src> {
-    pub src:&'src str,
-    pub input_pos:usize,
-    pub requirements:EnumSet<Requirement>
+    pub src: &'src str,
+    pub input_pos: usize,
+    pub requirements: EnumSet<Requirement>,
 }
 impl<'src> Input<'src> {
     pub fn new(src: &'src str) -> Self {
-        Self{src, input_pos:0, requirements:EnumSet::EMPTY}
+        Self {
+            src,
+            input_pos: 0,
+            requirements: EnumSet::EMPTY,
+        }
     }
 }
 
@@ -35,8 +41,9 @@ impl<'src> InputIter for Input<'src> {
     }
 
     fn position<P>(&self, predicate: P) -> Option<usize>
-      where
-        P: Fn(Self::Item) -> bool {
+    where
+        P: Fn(Self::Item) -> bool,
+    {
         self.src.position(predicate)
     }
 
@@ -47,13 +54,25 @@ impl<'src> InputIter for Input<'src> {
 impl<'src> InputTake for Input<'src> {
     fn take(&self, count: usize) -> Self {
         let src = &self.src[..count];
-        Self{src, input_pos:self.input_pos, requirements:self.requirements}
+        Self {
+            src,
+            input_pos: self.input_pos,
+            requirements: self.requirements,
+        }
     }
 
     fn take_split(&self, count: usize) -> (Self, Self) {
         let (prefix, suffix) = self.src.split_at(count);
-        let prefix = Self{src:prefix, input_pos:self.input_pos, requirements:self.requirements};
-        let suffix = Self{src:suffix, input_pos:self.input_pos+count, requirements:self.requirements};
+        let prefix = Self {
+            src: prefix,
+            input_pos: self.input_pos,
+            requirements: self.requirements,
+        };
+        let suffix = Self {
+            src: suffix,
+            input_pos: self.input_pos + count,
+            requirements: self.requirements,
+        };
         (suffix, prefix)
     }
 }
@@ -68,15 +87,23 @@ impl<'src> Compare<&str> for Input<'src> {
 }
 impl<'src> Slice<RangeFrom<usize>> for Input<'src> {
     fn slice(&self, range: RangeFrom<usize>) -> Self {
-        let input_pos = self.input_pos+range.start;
+        let input_pos = self.input_pos + range.start;
         let src = self.src.slice(range);
-        Self{src, input_pos, requirements:self.requirements}
+        Self {
+            src,
+            input_pos,
+            requirements: self.requirements,
+        }
     }
 }
 impl<'src> Slice<RangeTo<usize>> for Input<'src> {
     fn slice(&self, range: RangeTo<usize>) -> Self {
         let src = self.src.slice(range);
-        Self{src, input_pos:self.input_pos, requirements:self.requirements}
+        Self {
+            src,
+            input_pos: self.input_pos,
+            requirements: self.requirements,
+        }
     }
 }
 impl<'src> Offset for Input<'src> {
@@ -84,16 +111,20 @@ impl<'src> Offset for Input<'src> {
         self.src.offset(second.src)
     }
 }
-impl<'src> UnspecializedInput for Input<'src> {
-
-}
+impl<'src> UnspecializedInput for Input<'src> {}
 impl<'src> SpannedAst for Input<'src> {
     fn range(&self) -> std::ops::Range<usize> {
-        std::ops::Range{start:self.input_pos, end:self.input_pos+self.input_len()}
+        std::ops::Range {
+            start: self.input_pos,
+            end: self.input_pos + self.input_len(),
+        }
     }
 }
 impl<'src> Into<std::ops::Range<usize>> for Input<'src> {
     fn into(self) -> std::ops::Range<usize> {
-        std::ops::Range{start:self.input_pos, end:self.input_pos+self.input_len()}
+        std::ops::Range {
+            start: self.input_pos,
+            end: self.input_pos + self.input_len(),
+        }
     }
 }

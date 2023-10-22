@@ -12,6 +12,8 @@ jobs:
         with:
             toolchain: stable
             components: rustfmt, clippy
+      - name: Rustfmt Check
+        uses: actions-rust-lang/rustfmt@v1
       - name: Run cargo build
         run: RUSTFLAGS="$RUSTFLAGS -A dead_code" cargo build --release
       - name: Run cargo test

@@ -6,7 +6,7 @@ pub trait SpannedAst {
     fn range(&self) -> Range<usize>;
 }
 
-pub trait SpannedAstMut:SpannedAst {
+pub trait SpannedAstMut: SpannedAst {
     fn range_mut(&mut self) -> &mut Range<usize>;
 }
 impl<O> SpannedAst for Spanned<O> {
@@ -25,14 +25,22 @@ impl<O> SpannedAstMut for Spanned<O> {
 pub type Spanned<O> = (Range<usize>, O);
 pub type Name<'src> = Spanned<&'src str>;
 
-impl<O> SpannedAst for Vec<O> where O:SpannedAst{
+impl<O> SpannedAst for Vec<O>
+where
+    O: SpannedAst,
+{
     fn range(&self) -> Range<usize> {
-        let start = self.first().and_then(|r| Some(r.range().start)).unwrap_or(0);
-        let end = self.last().and_then(|r| Some(r.range().end)).unwrap_or(start);
-        Range{start, end}
+        let start = self
+            .first()
+            .and_then(|r| Some(r.range().start))
+            .unwrap_or(0);
+        let end = self
+            .last()
+            .and_then(|r| Some(r.range().end))
+            .unwrap_or(start);
+        Range { start, end }
     }
 }
-
 
 #[derive(PartialEq, Debug)]
 pub struct Problem<'src> {
@@ -46,7 +54,6 @@ pub struct Problem<'src> {
     pub metric: Option<Metric<'src>>,
     // pub length: Option<LengthSpecification>, // deprecated since PDDL 2.1
 }
-
 
 #[derive(PartialEq, Debug)]
 pub struct Domain<'src> {
@@ -83,7 +90,7 @@ pub enum Requirement {
     /// Allow numeric function definitions and use of effects using assignment operators and arithmetic preconditions.
     NumericFluents,
     /// Allows durative actions.
-    /// 
+    ///
     /// Note: that this does not imply `:numeric-fluents`
     DurativeActions,
     /// Allows duration constraints in durative actions using inequalities.
@@ -93,7 +100,7 @@ pub enum Requirement {
     /// Allows predicates whose truth value is defined by a formula
     DerivedPredicates,
     /// Allows the initial state to specify literals
-    /// that will become true at a specified time point 
+    /// that will become true at a specified time point
     /// implies [DurativeActions]
     TimedInitialLiterals,
     /// Allows use of preferences in action
@@ -103,30 +110,30 @@ pub enum Requirement {
     /// domain and problem files. These may contain modal operators supporting trajectory
     /// constraints.
     Constraints,
-    /// If this requirement is included in a PDDL specification, 
-    /// the use of numeric fluents is enabled (similar to the 
-    /// `:numeric-fluents` requirement). However, numeric fluents 
+    /// If this requirement is included in a PDDL specification,
+    /// the use of numeric fluents is enabled (similar to the
+    /// `:numeric-fluents` requirement). However, numeric fluents
     /// may only be used in certain very limited ways:
     /// 1. Numeric fluents may not be used in any conditions (preconditions, goal conditions,
     /// conditions of conditional effects, etc.).
-    /// 2. A numeric fluent may only be used as the target of an effect if it is 0-ary and called `total-cost`. 
+    /// 2. A numeric fluent may only be used as the target of an effect if it is 0-ary and called `total-cost`.
     /// If such an effect is used, then the `total-cost` fluent must be explicitly initialized
     /// to 0 in the initial state.
-    /// 3. The only allowable use of numeric fluents in effects is in effects of the form 
-    /// `(increase (total-cost) <numeric-term>)`, where the `<numeric-term>` is either 
+    /// 3. The only allowable use of numeric fluents in effects is in effects of the form
+    /// `(increase (total-cost) <numeric-term>)`, where the `<numeric-term>` is either
     /// a non-negative numeric constant or of the form `(<function-symbol> <term>*)`.
-    /// (The `<term>` here is interpreted as shown in the PDDL grammar, i.e. 
-    /// it is a variable symbol or an object constant. Note that this `<term>` cannot 
+    /// (The `<term>` here is interpreted as shown in the PDDL grammar, i.e.
+    /// it is a variable symbol or an object constant. Note that this `<term>` cannot
     /// be a `<function-term>`, even if the object fluents requirement is used.)
     /// 4. No numeric fluent may be initialized to a negative value.
-    /// 5. If the problem contains a `:metric` specification, the objective must 
-    /// be `(minimize (total-cost))`, or - only if the `:durative-actions` requirement 
-    /// is also set - to minimize a linear combination of `total-cost` and `total-time`, 
+    /// 5. If the problem contains a `:metric` specification, the objective must
+    /// be `(minimize (total-cost))`, or - only if the `:durative-actions` requirement
+    /// is also set - to minimize a linear combination of `total-cost` and `total-time`,
     /// with non-negative coefficients.
-    /// 
+    ///
     /// Note that an action can have multiple effects that increase `(total-cost)`, which
     /// is particularly useful in the context of conditional effects.
-    /// Also note that these restrictions imply that `(total-cost)` never 
+    /// Also note that these restrictions imply that `(total-cost)` never
     /// decreases throughout plan execution, i.e., action costs are never negative.
     ActionCosts,
 }
@@ -156,27 +163,25 @@ impl std::fmt::Display for Requirement {
     }
 }
 
-
 #[derive(PartialEq, Debug)]
 pub struct Forall<'src, T> {
     pub variables: Vec<List<'src>>,
-    pub gd: Box<T>
+    pub gd: Box<T>,
 }
 
 #[derive(PartialEq, Debug)]
 pub struct When<T, P> {
     pub gd: T,
-    pub effect: Box<P>
+    pub effect: Box<P>,
 }
 
 #[derive(PartialEq, Debug)]
 pub struct Preference<'src, T> {
     pub name: Option<Name<'src>>,
-    pub gd: T
+    pub gd: T,
 }
 
 pub type Exists<'src, T> = Forall<'src, T>;
-
 
 #[derive(PartialEq, Debug)]
 pub enum PreconditionExpr<'src> {
@@ -189,31 +194,30 @@ pub enum PreconditionExpr<'src> {
 #[derive(PartialEq, Debug)]
 pub enum GD<'src> {
     AtomicFormula(AtomicFormula<'src, Term<'src>>),
-    And(Vec<GD<'src>>), // not(and(f1, f2, f2)) is legal, but not(and(Preference, Preference, Preference)) is not, 
-                      // however and(Preference, Preference, Preference) is legal. That's why GD has And too.
-    Or(Vec<GD<'src>>), //:disjunctive−preconditions
-    Not(Box<GD<'src>>), // :disjunctive−preconditions
+    And(Vec<GD<'src>>), // not(and(f1, f2, f2)) is legal, but not(and(Preference, Preference, Preference)) is not,
+    // however and(Preference, Preference, Preference) is legal. That's why GD has And too.
+    Or(Vec<GD<'src>>),                //:disjunctive−preconditions
+    Not(Box<GD<'src>>),               // :disjunctive−preconditions
     Imply(Box<(GD<'src>, GD<'src>)>), // :disjunctive−preconditions
-    Exists(Exists<'src, Self>), // :existential−preconditions
-    Forall(Forall<'src, Self>), // :universal−preconditions
-    
+    Exists(Exists<'src, Self>),       // :existential−preconditions
+    Forall(Forall<'src, Self>),       // :universal−preconditions
+
     LessThan(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
     LessThanOrEqual(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
-    Equal(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
+    Equal(FluentExpression<'src>, FluentExpression<'src>),    // :numeric-fluents
     GreatherThanOrEqual(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
     GreaterThan(FluentExpression<'src>, FluentExpression<'src>), // :numeric-fluents
-
 }
 
 #[derive(PartialEq, Debug)]
 pub enum FluentExpression<'src> {
-    Number(i64), // :numeric-fluents
+    Number(i64),                                   // :numeric-fluents
     Subtract(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
     Negate(Box<Spanned<Self>>),
     Divide(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
-    Add(Vec<Spanned<Self>>), // :numeric-fluents
-    Multiply(Vec<Spanned<Self>>), // :numeric-fluents
-    Function(FunctionTerm<'src>), // :numeric-fluents
+    Add(Vec<Spanned<Self>>),                     // :numeric-fluents
+    Multiply(Vec<Spanned<Self>>),                // :numeric-fluents
+    Function(FunctionTerm<'src>),                // :numeric-fluents
 }
 
 #[derive(PartialEq, Debug)]
@@ -235,7 +239,7 @@ pub enum Effect<'src> {
 pub enum DurationConstraint<'src> {
     None,
     And(Vec<Self>), // :duration−inequalities
-    AtStart(Box<Self>), 
+    AtStart(Box<Self>),
     AtEnd(Box<Self>),
     GreaterOrEquals(Spanned<FluentExpression<'src>>), // :duration−inequalities
     LessThanOrEquals(Spanned<FluentExpression<'src>>), // :duration−inequalities
@@ -282,20 +286,19 @@ pub enum ConstraintGD<'src> {
     HoldAfter(i64, GD<'src>),
 }
 
-
 #[derive(PartialEq, Debug)]
 pub enum TimedEffect<'src> {
     AtStart(Effect<'src>),
     AtEnd(Effect<'src>),
-    Effect(Effect<'src>)
+    Effect(Effect<'src>),
 }
 
 #[derive(PartialEq, Debug)]
 pub enum Init<'src> {
     AtomicFormula(NegativeFormula<'src, Name<'src>>),
     At(i64, NegativeFormula<'src, Name<'src>>), // :timed−initial−literals
-    Equals(FunctionTerm<'src>, i64), // :numeric-fluents
-    Is(FunctionTerm<'src>, Name<'src>), // :object-fluents
+    Equals(FunctionTerm<'src>, i64),            // :numeric-fluents
+    Is(FunctionTerm<'src>, Name<'src>),         // :object-fluents
 }
 
 #[derive(PartialEq, Debug)]
@@ -321,35 +324,35 @@ pub enum Metric<'src> {
 #[derive(PartialEq, Debug)]
 pub enum Action<'src> {
     Basic(BasicAction<'src>),
-    Durative(DurativeAction<'src>), // :durative−actions
+    Durative(DurativeAction<'src>),           // :durative−actions
     Derived(AtomicFSkeleton<'src>, GD<'src>), // :derived−predicates
 }
 
 #[derive(PartialEq, Debug)]
 pub struct BasicAction<'src> {
-    pub name:Name<'src>, 
-    pub parameters: Vec<List<'src>>, 
-    pub precondition:Option<PreconditionExpr<'src>>, 
-    pub effect:Option<Effect<'src>>
+    pub name: Name<'src>,
+    pub parameters: Vec<List<'src>>,
+    pub precondition: Option<PreconditionExpr<'src>>,
+    pub effect: Option<Effect<'src>>,
 }
 
 #[derive(PartialEq, Debug)]
 pub struct DurativeAction<'src> {
-    pub name:Name<'src>, 
-    pub parameters: Vec<List<'src>>, 
+    pub name: Name<'src>,
+    pub parameters: Vec<List<'src>>,
     pub duration: DurationConstraint<'src>,
-    pub condition: Option<DurationGD<'src>>, 
-    pub effect:Option<DurationEffect<'src>>
+    pub condition: Option<DurationGD<'src>>,
+    pub effect: Option<DurationEffect<'src>>,
 }
 
 /// Structure used for both Predicates and Functions
-/// 
-/// Predicates are defined as 
+///
+/// Predicates are defined as
 /// ```ebnf
 /// <atomic formula skeleton> ::= (<predicate> <typed list (variable)>)
 /// <predicate> ::= <name>
 /// ```
-/// Functions are defined as 
+/// Functions are defined as
 /// ```ebnf
 /// <atomic function skeleton> ::= (<function-symbol> <typed list (variable)>)
 /// <function-symbol> ::= <name>
@@ -358,29 +361,28 @@ pub struct DurativeAction<'src> {
 #[derive(PartialEq, Debug)]
 pub struct AtomicFSkeleton<'src> {
     pub name: Name<'src>,
-    pub variables: Vec<List<'src>>
+    pub variables: Vec<List<'src>>,
 }
 
 #[derive(PartialEq, Debug)]
 pub enum Type<'src> {
     None,
     Either(Vec<Name<'src>>),
-    Exact(Name<'src>)
+    Exact(Name<'src>),
 }
-
 
 /// [`FunctionTypeKind::Numeric`] if `:numeric-fluents` is set.
 #[derive(PartialEq, Debug)]
 pub enum FunctionType<'src> {
     None,
     Numeric(Spanned<i64>),
-    Typed(Type<'src>)
+    Typed(Type<'src>),
 }
 
 #[derive(PartialEq, Debug)]
 pub struct FunctionTypedList<'src> {
     pub functions: Vec<AtomicFSkeleton<'src>>,
-    pub kind: FunctionType<'src>
+    pub kind: FunctionType<'src>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -392,21 +394,20 @@ pub struct List<'src> {
 #[derive(PartialEq, Debug)]
 pub enum AtomicFormula<'src, T> {
     Predicate(Name<'src>, Vec<T>),
-    Equality(T, T)
+    Equality(T, T),
 }
 
 #[derive(PartialEq, Debug)]
 pub enum NegativeFormula<'src, T> {
     Direct(AtomicFormula<'src, T>),
-    Not(AtomicFormula<'src, T>)
+    Not(AtomicFormula<'src, T>),
 }
-
 
 /// Function name with 0 or more arguments
 #[derive(PartialEq, Debug)]
 pub struct FunctionTerm<'src> {
-    pub name:Name<'src>,
-    pub terms:Vec<Term<'src>>
+    pub name: Name<'src>,
+    pub terms: Vec<Term<'src>>,
 }
 
 impl<'src> SpannedAst for FunctionTerm<'src> {
@@ -420,7 +421,7 @@ impl<'src> SpannedAst for FunctionTerm<'src> {
 pub enum Term<'src> {
     Name(Name<'src>),
     Variable(Name<'src>),
-    Function(FunctionTerm<'src>) // :object-fluents
+    Function(FunctionTerm<'src>), // :object-fluents
 }
 
 impl<'src> SpannedAst for Term<'src> {
@@ -428,7 +429,7 @@ impl<'src> SpannedAst for Term<'src> {
         match self {
             Self::Name(n) => n.0.clone(),
             Self::Variable(v) => v.0.clone(),
-            Self::Function(f) => f.range()
+            Self::Function(f) => f.range(),
         }
     }
 }
