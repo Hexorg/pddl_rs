@@ -1,9 +1,24 @@
-name: "Run TODO to Issue"
-on: ["push"]
+on: [push]
+name: Build and Test
 jobs:
-    build:
-        runs-on: "ubuntu-latest"
-        steps:
-            - uses: "actions/checkout@v3"
-            - name: "TODO to Issue"
-              uses: "alstr/todo-to-issue-action@v4"
+  check:
+    name: Rust project
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            components: rustfmt, clippy
+      - name: Install Rust Cache
+        uses: Swatinem/rust-cache@v1
+      - name: Run cargo build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build --release
+      - name: Run cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test --release

@@ -121,7 +121,8 @@ mod test {
         assert_eq!(a_star(&p), vec![0])
     }
 
-    // #[test]
+    #[test]
+    #[ignore = "takes too long without optimizations"]
     fn barman_pddl_search() {
         let solution = full_search("sample_problems/barman/domain.pddl", "sample_problems/barman/problem_5_10_7.pddl");
         assert_eq!(solution, vec![182, 6, 404])
