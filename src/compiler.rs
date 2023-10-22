@@ -53,7 +53,7 @@ pub trait Runnable {
 }
 
 impl Runnable for Vec<Instruction> {
-    fn run(&self, state:&[bool], functions:&[i64]) -> bool {
+    fn run(&self, state:&[bool], _:&[i64]) -> bool {
         let mut stack = Vec::<Value>::with_capacity(512);
         for instruction in self {
             match instruction {
@@ -295,7 +295,7 @@ fn compile_term_atomic_formula<'src>(compiler:&CompilerData<'src>, af:&AtomicFor
                         }
                         call_vec.push(name.1);
                     },
-                    Function(func) => todo!()
+                    Function(_) => todo!()
                 }
             }
             if let Some(offset) = compiler.predicate_memory_map.get(&call_vec) {
@@ -372,7 +372,7 @@ fn compile_name_negative_formula<'src>(compiler:&CompilerData<'src>, formula:&Ne
     }
 }
 
-fn compile_fexp<'src>(compiler:&CompilerData<'src>, fexp:&FluentExpression<'src>, instructions: &mut Vec<Instruction>) -> Result<(), Error<'src>> {
+fn compile_fexp<'src>(_:&CompilerData<'src>, fexp:&FluentExpression<'src>, instructions: &mut Vec<Instruction>) -> Result<(), Error<'src>> {
     match fexp {
         FluentExpression::Number(n) => instructions.push(Instruction::Push(*n)),
         FluentExpression::Subtract(_) => todo!(),
@@ -387,7 +387,6 @@ fn compile_fexp<'src>(compiler:&CompilerData<'src>, fexp:&FluentExpression<'src>
 
 enum SupportedFunctionOp {
     INC,
-    DEC
 }
 fn function_op<'src>(compiler:&CompilerData<'src>, function:&FunctionTerm<'src>, fexp:&FluentExpression<'src>, op:SupportedFunctionOp, instructions: &mut Vec<Instruction>) -> Result<(), Error<'src>> {
     compile_fexp(compiler, fexp, instructions)?;
@@ -396,7 +395,6 @@ fn function_op<'src>(compiler:&CompilerData<'src>, function:&FunctionTerm<'src>,
         instructions.push(Instruction::ReadFunction(0)); // todo! map functions
         match op {
             INC => instructions.push(Instruction::Add),
-            DEC => instructions.push(Instruction::Sub),
         }
         instructions.push(Instruction::SetFunction(0));
         Ok(())
@@ -522,8 +520,7 @@ fn map_objects<'src>(domain:&Domain<'src>, problem:&Problem<'src>) -> Result<Com
 
 #[cfg(test)]
 pub mod tests {
-    use std::fs;
-    use crate::{parser::{parse_domain, parse_problem}, compiler::{compile_problem, CompiledProblem, Instruction, CompiledAction}, search::a_star};
+    use crate::{parser::{parse_domain, parse_problem}, compiler::{compile_problem, Instruction, CompiledAction}};
 
     use super::*;
 

@@ -13,6 +13,6 @@ jobs:
             toolchain: stable
             components: rustfmt, clippy
       - name: Run cargo build
-        run: cargo build --release
+        run: RUSTFLAGS="$RUSTFLAGS -A dead_code" cargo build --release
       - name: Run cargo test
-        run: cargo test --release --all-features
+        run: RUSTFLAGS="$RUSTFLAGS -A dead_code" cargo test --release --all-features

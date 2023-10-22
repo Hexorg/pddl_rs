@@ -1,3 +1,5 @@
+[![Build status](https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml/badge.svg)(https://github.com/Hexorg/pddl_rs/actions/workflows/workflow.yml)]
+
 # pddl_rs
 
 PDDL Parsing library based on [Daniel L. Kovacs' BNF definition](http://pddl4j.imag.fr/repository/wiki/BNF-PDDL-3.1.pdf) BNF Definition of PDDL. Future plans include adding planning algorithms to reflect [PDDL4J library](https://github.com/pellierd/pddl4j)

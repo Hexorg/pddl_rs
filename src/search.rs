@@ -1,4 +1,4 @@
-use std::{collections::{BinaryHeap, HashMap}, fs, hash::Hash};
+use std::{collections::{BinaryHeap, HashMap}, hash::Hash};
 pub mod routing;
 use crate::compiler::{CompiledProblem, Runnable};
 
@@ -123,31 +123,33 @@ mod test {
 
     #[test]
     #[ignore = "takes too long without optimizations"]
-    fn barman_pddl_search() {
-        let solution = full_search("sample_problems/barman/domain.pddl", "sample_problems/barman/problem_5_10_7.pddl");
-        assert_eq!(solution, vec![182, 6, 404])
+    fn barman_pddl_search() -> std::io::Result<()> {
+        let solution = full_search("sample_problems/barman/domain.pddl", "sample_problems/barman/problem_5_10_7.pddl")?;
+        assert_eq!(solution, vec![182, 6, 404]);
+        Ok(())
     }
 
     #[test]
-    fn simple_pddl_search() {
-        let solution = full_search("sample_problems/simple_domain.pddl", "sample_problems/simple_problem.pddl");
-        assert_eq!(solution, vec![182, 219, 6, 404])
+    fn simple_pddl_search() -> std::io::Result<()>{
+        let solution = full_search("sample_problems/simple_domain.pddl", "sample_problems/simple_problem.pddl")?;
+        assert_eq!(solution, vec![182, 219, 6, 404]);
+        Ok(())
     }
 
-    fn full_search(domain_filename:&'static str, problem_filename:&'static str) -> Vec<usize> {
+    fn full_search(domain_filename:&'static str, problem_filename:&'static str) -> std::io::Result<Vec<usize>> {
         use std::fs;
         let domain_src = fs::read_to_string(domain_filename).unwrap();
         let domain = match parse_domain(&domain_src) {
-            Err(e) => {e.report(domain_filename).eprint((domain_filename, ariadne::Source::from(&domain_src))); panic!() },
+            Err(e) => {e.report(domain_filename).eprint((domain_filename, ariadne::Source::from(&domain_src)))?; panic!() },
             Ok(d) => d,
         };
         let problem_src = fs::read_to_string(problem_filename).unwrap();
         let problem = match parse_problem(&problem_src, domain.requirements) {
-            Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src))); panic!() },
+            Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src)))?; panic!() },
             Ok(p) => p
         };
         let c_problem = match compile_problem(&domain, &problem) {
-            Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src))); panic!() },
+            Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src)))?; panic!() },
             Ok(cd) => cd,
         };
         println!("Compiled problem needs {} bits of memory and uses {} actions.", c_problem.memory_size, c_problem.actions.len());
@@ -157,6 +159,6 @@ mod test {
             let action = c_problem.actions.get(*action_id).unwrap();
             println!("\t{}{:?}", action.name.1, action.args.iter().map(|(_, s)| *s).collect::<Vec<&str>>());
         }
-        solution
+        Ok(solution)
     }
 }
