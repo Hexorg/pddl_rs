@@ -137,13 +137,19 @@ mod test {
     }
 
     fn full_search(domain_filename:&'static str, problem_filename:&'static str) -> std::io::Result<Vec<usize>> {
-        use std::fs;
-        let domain_src = fs::read_to_string(domain_filename).unwrap();
+        use std::{fs, env, path::Path};
+        let (domain_src, problem_src) = match env::var("CARGO_MANIFEST_DIR") {
+            Ok(path) => { let p = Path::new(&path);
+                let domain_src = fs::read_to_string(p.join(domain_filename))?;
+                let problem_src = fs::read_to_string(p.join(problem_filename))?;
+                (domain_src, problem_src)
+            }
+            Err(_) => panic!("CARGO_MANIFEST_DIR is unset."),
+        };
         let domain = match parse_domain(&domain_src) {
             Err(e) => {e.report(domain_filename).eprint((domain_filename, ariadne::Source::from(&domain_src)))?; panic!() },
             Ok(d) => d,
         };
-        let problem_src = fs::read_to_string(problem_filename).unwrap();
         let problem = match parse_problem(&problem_src, domain.requirements) {
             Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src)))?; panic!() },
             Ok(p) => p
