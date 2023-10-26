@@ -402,7 +402,7 @@ pub struct List<'src> {
     pub kind: Type<'src>,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Hash, Eq, Clone)]
 pub enum AtomicFormula<'src, T> {
     Predicate(Name<'src>, Vec<T>),
     Equality(T, T),
@@ -415,7 +415,7 @@ pub enum NegativeFormula<'src, T> {
 }
 
 /// Function name with 0 or more arguments
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Hash, Eq, Clone)]
 pub struct FunctionTerm<'src> {
     pub name: Name<'src>,
     pub terms: Vec<Term<'src>>,
@@ -428,7 +428,7 @@ impl<'src> SpannedAst for FunctionTerm<'src> {
 }
 
 /// A name, variable, or function
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Hash, Eq, Clone)]
 pub enum Term<'src> {
     Name(Name<'src>),
     Variable(Name<'src>),

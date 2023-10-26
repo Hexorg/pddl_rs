@@ -113,8 +113,9 @@ pub fn a_star(problem: &CompiledProblem) -> Vec<usize> {
 
 #[cfg(test)]
 mod test {
+
     use crate::{
-        compiler::{compile_problem, CompiledAction, CompiledProblem, Instruction},
+        compiler::{compile_problem, Action, CompiledAction, CompiledProblem, Instruction},
         parser::{parse_domain, parse_problem},
         search::a_star,
     };
@@ -126,13 +127,13 @@ mod test {
             memory_size: 1,
             actions: vec![
                 CompiledAction {
-                    name: (0..0, "set"),
+                    domain_action_idx: 0,
                     args: vec![(1..1, "a"), (1..1, "a")],
                     precondition: vec![ReadState(0), Not],
                     effect: vec![And(0), SetState(0)],
                 },
                 CompiledAction {
-                    name: (0..0, "unset"),
+                    domain_action_idx: 1,
                     args: vec![(1..1, "a"), (1..1, "a")],
                     precondition: vec![ReadState(0)],
                     effect: vec![And(0), Not, SetState(0)],
@@ -140,6 +141,7 @@ mod test {
             ],
             init: vec![And(0), Not, SetState(0)],
             goal: vec![ReadState(0)],
+            action_graph: Vec::new(),
         };
         assert_eq!(a_star(&p), vec![0])
     }
@@ -215,7 +217,10 @@ mod test {
             let action = c_problem.actions.get(*action_id).unwrap();
             println!(
                 "\t{}{:?}",
-                action.name.1,
+                match &domain.actions[action.domain_action_idx] {
+                    Action::Basic(ba) => ba.name.1,
+                    _ => "",
+                },
                 action.args.iter().map(|(_, s)| *s).collect::<Vec<&str>>()
             );
         }

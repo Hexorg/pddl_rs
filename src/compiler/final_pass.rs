@@ -1,21 +1,133 @@
+use std::ops::Range;
+
 use crate::{Error, ErrorKind};
 
-use super::{*, first_pass::FirstPassData};
+use super::{
+    action_graph::{TryNode, TryNodeList},
+    inertia::StateInertia,
+    *,
+};
 
+enum Context<'src, 'ast, 'pass> {
+    Basic {
+        instructions: Vec<Instruction>,
+    },
+    Action {
+        domain_action_idx: usize,
+        compiled_action_idx: usize,
+        variable_to_object: &'pass [(&'ast Name<'src>, &'ast Name<'src>)],
+        state_inertia: &'pass mut Vec<StateInertia>,
+    },
+    Precondition {
+        variable_to_object: &'pass [(&'ast Name<'src>, &'ast Name<'src>)],
+        compiled_action_idx: usize,
+        instructions: Vec<Instruction>,
+        state_inertia: &'pass mut Vec<StateInertia>,
+        is_positive: bool,
+    },
+    Effect {
+        variable_to_object: &'pass [(&'ast Name<'src>, &'ast Name<'src>)],
+        compiled_action_idx: usize,
+        instructions: Vec<Instruction>,
+        state_inertia: &'pass mut Vec<StateInertia>,
+        is_positive: bool,
+    },
+}
 
+impl<'src, 'ast, 'pass> Context<'src, 'ast, 'pass> {
+    pub fn instructions(self) -> Vec<Instruction> {
+        match self {
+            Self::Basic { instructions } => instructions,
+            Self::Precondition { instructions, .. } => instructions,
+            Self::Effect { instructions, .. } => instructions,
+            _ => panic!("Unexpected context"),
+        }
+    }
+    pub fn state_inertia_mut(&mut self) -> &mut Vec<StateInertia> {
+        match self {
+            Context::Action { state_inertia, .. } => state_inertia,
+            Context::Precondition { state_inertia, .. } => state_inertia,
+            Context::Effect { state_inertia, .. } => state_inertia,
+            _ => panic!("Unexpected context"),
+        }
+    }
+    pub fn instructions_mut(&mut self) -> &mut Vec<Instruction> {
+        match self {
+            Self::Basic { instructions } => instructions,
+            Self::Precondition { instructions, .. } => instructions,
+            Self::Effect { instructions, .. } => instructions,
+            _ => panic!("Unexpected context"),
+        }
+    }
+    pub fn variable_to_object(&self) -> &'pass [(&'ast Name<'src>, &'ast Name<'src>)] {
+        match self {
+            Self::Precondition {
+                variable_to_object, ..
+            } => variable_to_object,
+            Self::Effect {
+                variable_to_object, ..
+            } => variable_to_object,
+            Self::Action {
+                variable_to_object, ..
+            } => variable_to_object,
+            _ => panic!("Unexpected context"),
+        }
+    }
+    pub fn is_effect(&self) -> bool {
+        match self {
+            Self::Effect { .. } => true,
+            _ => false,
+        }
+    }
+    pub fn set_negative(&mut self) {
+        match self {
+            Self::Effect { is_positive, .. } | Self::Precondition { is_positive, .. } => {
+                *is_positive = false
+            }
+            _ => (),
+        }
+    }
+    pub fn get_compiled_action_idx(&self) -> usize {
+        match self {
+            Self::Action {
+                compiled_action_idx,
+                ..
+            } => *compiled_action_idx,
+            Self::Effect {
+                compiled_action_idx,
+                ..
+            } => *compiled_action_idx,
+            Self::Precondition {
+                compiled_action_idx,
+                ..
+            } => *compiled_action_idx,
+            _ => panic!("Unexpected context"),
+        }
+    }
+}
 
-pub fn final_pass<'src>(pass_data:&FirstPassData<'src>, domain:&Domain<'src>, problem:&Problem<'src>) -> Result<CompiledProblem<'src>, Error<'src>> {
-    let actions = create_concrete_actions(&pass_data, domain)?;
+pub fn final_pass<'src>(
+    mut pass_data: DomainData<'src>,
+    domain: &Domain<'src>,
+    problem: &Problem<'src>,
+) -> Result<CompiledProblem<'src>, Error<'src>> {
+    let (actions, state_inertia) = create_concrete_actions(&mut pass_data, domain)?;
     let init = visit_init(&pass_data, &problem.init)?;
-    let mut goal = Vec::with_capacity(32);
-    
-    visit_precondition(&pass_data, &problem.goal, None, &mut goal)?;
-    Ok(CompiledProblem {
-        memory_size: pass_data.preprocess.predicate_memory_map.len(),
-        actions,
-        init,
-        goal,
-    })
+    let mut goal_context = Context::Basic {
+        instructions: Vec::with_capacity(32),
+    };
+
+    visit_precondition(&pass_data, &problem.goal, &mut goal_context)?;
+    match goal_context {
+        Context::Basic { instructions } => Ok(CompiledProblem {
+            memory_size: pass_data.predicate_memory_map.len(),
+            actions,
+            init,
+            goal: instructions,
+            action_graph: pass_data.action_graph,
+        }),
+        _ => panic!("Context changed while compiling goals."),
+    }
 }
 
 /// Action parameters type to object map results in permutations
@@ -30,51 +142,109 @@ pub fn final_pass<'src>(pass_data:&FirstPassData<'src>, domain:&Domain<'src>, pr
 /// * `compiler` - all pre-computed maps maintained by the compiler
 /// * `domain` - PDDL Domain that defines all the actions needed to create.
 fn create_concrete_actions<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &mut DomainData<'src>,
     domain: &Domain<'src>,
-) -> Result<Vec<CompiledAction<'src>>, Error<'src>> {
+) -> Result<(Vec<CompiledAction<'src>>, Vec<StateInertia>), Error<'src>> {
     let mut all_actions =
-        Vec::with_capacity(pass_data.preprocess.predicate_memory_map.len() * domain.actions.len() / 5);
-    for action in &domain.actions {
+        Vec::with_capacity(pass_data.predicate_memory_map.len() * domain.actions.len() / 5);
+
+    // let mut state_inertia = Vec::new();
+    let mut compiled_action_idx = 0;
+    let mut state_inertia = vec![StateInertia::new(); pass_data.predicate_memory_map.len()];
+    for (domain_action_idx, action) in domain.actions.iter().enumerate() {
         if let Action::Basic(action @ BasicAction { parameters, .. }) = action {
             // Create action for all type-object permutations.
             let actions = for_all_type_object_permutations(
-                &pass_data.preprocess.type_to_objects_map,
+                &pass_data.type_to_objects_map,
                 parameters.as_slice(),
-                |args| visit_basic_action(pass_data, Some(args), action),
+                |args| {
+                    let mut context = Context::Action {
+                        variable_to_object: args,
+                        domain_action_idx,
+                        compiled_action_idx,
+                        state_inertia: &mut state_inertia,
+                    };
+                    let result = visit_basic_action(pass_data, action, &mut context);
+                    compiled_action_idx = context.get_compiled_action_idx();
+                    result
+                },
             )?;
             all_actions.extend(actions)
         } else {
             todo!()
         }
     }
-    Ok(all_actions)
+    Ok((all_actions, state_inertia))
 }
 
 fn visit_basic_action<'src>(
-    pass_data: &FirstPassData<'src>,
-    args: Option<&[(&Name<'src>, &Name<'src>)]>,
+    pass_data: &DomainData<'src>,
     action: &BasicAction<'src>,
+    context: &mut Context<'src, '_, '_>,
+    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
+    // domain_action_idx: usize,
+    // compiled_action_count: usize,
+    // state_inertia: &mut Vec<StateInertia>,
 ) -> Result<CompiledAction<'src>, Error<'src>> {
-    let mut precondition = Vec::new();
+    let (variable_to_object, args, compiled_action_idx, domain_action_idx, state_inertia) =
+        match context {
+            Context::Action {
+                variable_to_object,
+                domain_action_idx,
+                compiled_action_idx,
+                state_inertia,
+            } => {
+                let args = variable_to_object
+                    .iter()
+                    .map(|(_, o)| (**o).clone())
+                    .collect();
+                let domain_action_idx = *domain_action_idx;
+                let compiled_action_idx2 = *compiled_action_idx;
+                *compiled_action_idx += 1;
+                (
+                    variable_to_object,
+                    args,
+                    compiled_action_idx2,
+                    domain_action_idx,
+                    state_inertia,
+                )
+            }
+            _ => panic!("Unexpected state."),
+        };
+    let mut precondition_context = Context::Precondition {
+        variable_to_object,
+        instructions: Vec::new(),
+        compiled_action_idx,
+        state_inertia,
+        is_positive: true,
+    };
     action
         .precondition
         .as_ref()
-        .and_then(|p| Some(visit_precondition(pass_data, p, args, &mut precondition)))
+        .and_then(|precondition| {
+            Some(visit_precondition(
+                pass_data,
+                precondition,
+                &mut precondition_context,
+            ))
+        })
         .unwrap_or(Ok(()))?;
-    let mut effect = Vec::new();
+    let precondition = precondition_context.instructions();
+    let mut effect_context = Context::Effect {
+        variable_to_object,
+        instructions: Vec::new(),
+        compiled_action_idx,
+        state_inertia,
+        is_positive: true,
+    };
     action
         .effect
         .as_ref()
-        .and_then(|e| Some(visit_effect(pass_data, e, args, &mut effect)))
+        .and_then(|effect| Some(visit_effect(pass_data, effect, &mut effect_context)))
         .unwrap_or(Ok(()))?;
-    let args: Vec<Name> = if let Some(args) = args {
-        args.iter().map(|(_, o)| (**o).clone()).collect()
-    } else {
-        Vec::new()
-    };
+    let effect = effect_context.instructions();
     Ok(CompiledAction {
-        name: action.name.clone(),
+        domain_action_idx,
         args,
         precondition,
         effect,
@@ -82,7 +252,7 @@ fn visit_basic_action<'src>(
 }
 
 fn visit_init<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     init: &[Init<'src>],
 ) -> Result<Vec<Instruction>, Error<'src>> {
     let mut instructions = Vec::with_capacity(32);
@@ -101,14 +271,17 @@ fn visit_init<'src>(
 }
 
 fn visit_term_atomic_formula<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     af: &AtomicFormula<'src, Term<'src>>,
-    args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    instructions: &mut Vec<Instruction>,
-    is_effect: bool,
+    context: &mut Context,
+    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
+    // compiled_action_count: usize,
+    // instructions: &mut Vec<Instruction>,
+    // state_inertia: &mut Vec<StateInertia>,
+    // is_effect: bool,
 ) -> Result<(), Error<'src>> {
-    use ErrorKind::{ExpectedName, ExpectedVariable, UndeclaredVariable};
     use super::Term::*;
+    use ErrorKind::{ExpectedName, ExpectedVariable, UndeclaredVariable};
     match af {
         AtomicFormula::Predicate(name, params) => {
             let mut call_vec = Vec::with_capacity(params.len() + 1);
@@ -116,17 +289,8 @@ fn visit_term_atomic_formula<'src>(
             for param in params {
                 match param {
                     Variable(var) => {
-                        if args.is_none() {
-                            return Err(Error {
-                                input: None,
-                                kind: ExpectedName,
-                                chain: None,
-                                range: param.range(),
-                            });
-                        }
-                        let args = args.unwrap();
                         let mut is_found = false;
-                        for arg in args {
+                        for arg in context.variable_to_object() {
                             if var.1 == arg.0 .1 {
                                 call_vec.push(arg.1 .1);
                                 is_found = true;
@@ -143,25 +307,54 @@ fn visit_term_atomic_formula<'src>(
                         }
                     }
                     Name(name) => {
-                        if args.is_some() {
-                            return Err(Error {
-                                input: None,
-                                kind: ExpectedVariable,
-                                chain: None,
-                                range: param.range(),
-                            });
-                        }
                         call_vec.push(name.1);
                     }
                     Function(_) => todo!(),
                 }
             }
-            if let Some(offset) = pass_data.preprocess.predicate_memory_map.get(&call_vec) {
-                instructions.push(if is_effect {
-                    Instruction::SetState(*offset)
-                } else {
-                    Instruction::ReadState(*offset)
-                })
+            if let Some(offset) = pass_data.predicate_memory_map.get(&call_vec) {
+                match context {
+                    Context::Effect {
+                        instructions,
+                        state_inertia,
+                        compiled_action_idx,
+                        is_positive,
+                        ..
+                    } => {
+                        instructions.push(Instruction::SetState(*offset));
+                        if *is_positive {
+                            state_inertia[*offset]
+                                .provides_positive
+                                .push(*compiled_action_idx);
+                        } else {
+                            state_inertia[*offset]
+                                .provides_negative
+                                .push(*compiled_action_idx);
+                        }
+                    }
+                    Context::Precondition {
+                        instructions,
+                        state_inertia,
+                        compiled_action_idx,
+                        is_positive,
+                        ..
+                    } => {
+                        instructions.push(Instruction::ReadState(*offset));
+                        if *is_positive {
+                            state_inertia[*offset]
+                                .wants_positive
+                                .push(*compiled_action_idx);
+                        } else {
+                            state_inertia[*offset]
+                                .wants_negative
+                                .push(*compiled_action_idx);
+                        }
+                    }
+                    Context::Basic { instructions } => {
+                        instructions.push(Instruction::ReadState(*offset))
+                    }
+                    _ => panic!("Unexpected Context"),
+                }
             } else {
                 panic!("All variables matched, and predicate exists, but can't find this call vec memory offset")
             }
@@ -171,8 +364,9 @@ fn visit_term_atomic_formula<'src>(
     }
 }
 
+/// Visited by problem but not domain
 fn visit_name_atomic_formula<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     af: &AtomicFormula<'src, Name<'src>>,
     instructions: &mut Vec<Instruction>,
 ) -> Result<(), Error<'src>> {
@@ -180,7 +374,7 @@ fn visit_name_atomic_formula<'src>(
         AtomicFormula::Predicate(name, args) => {
             let mut call_vec = vec![name.1];
             call_vec.extend(args.iter().map(|a| a.1));
-            if let Some(offset) = pass_data.preprocess.predicate_memory_map.get(&call_vec) {
+            if let Some(offset) = pass_data.predicate_memory_map.get(&call_vec) {
                 instructions.push(Instruction::SetState(*offset));
                 Ok(())
             } else {
@@ -193,25 +387,23 @@ fn visit_name_atomic_formula<'src>(
 }
 
 fn visit_gd<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     gd: &GD<'src>,
-    args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    instructions: &mut Vec<Instruction>,
+    context: &mut Context,
 ) -> Result<(), Error<'src>> {
     match gd {
-        GD::AtomicFormula(af) => {
-            visit_term_atomic_formula(pass_data, af, args, instructions, false)
-        }
+        GD::AtomicFormula(af) => visit_term_atomic_formula(pass_data, af, context),
         GD::And(vec) => {
             for gd in vec {
-                visit_gd(pass_data, gd, args, instructions)?
+                visit_gd(pass_data, gd, context)?
             }
             Ok(())
         }
         GD::Or(_) => todo!(),
         GD::Not(gd) => {
-            visit_gd(pass_data, gd, args, instructions)?;
-            instructions.push(Instruction::Not);
+            context.set_negative();
+            visit_gd(pass_data, gd, context)?;
+            context.instructions_mut().push(Instruction::Not);
             Ok(())
         }
         GD::Imply(_) => todo!(),
@@ -226,51 +418,58 @@ fn visit_gd<'src>(
 }
 
 fn visit_precondition<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     precondition: &PreconditionExpr<'src>,
-    args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    instructions: &mut Vec<Instruction>,
+    context: &mut Context,
+    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
+    // compiled_action_count: usize,
+    // instructions: &mut Vec<Instruction>,
+    // state_inertia: &mut Vec<StateInertia>,
 ) -> Result<(), Error<'src>> {
     match precondition {
         PreconditionExpr::And(vec) => {
-            for preconditions in vec {
-                visit_precondition(pass_data, preconditions, args, instructions)?
+            for precondition in vec {
+                visit_precondition(pass_data, precondition, context)?
             }
-            instructions.push(Instruction::And(vec.len()));
+            context.instructions_mut().push(Instruction::And(vec.len()));
             Ok(())
         }
         PreconditionExpr::Forall(_) => todo!(),
         PreconditionExpr::Preference(_) => todo!(),
-        PreconditionExpr::GD(gd) => visit_gd(pass_data, gd, args, instructions),
+        PreconditionExpr::GD(gd) => visit_gd(pass_data, gd, context),
     }
 }
 
 fn visit_term_negative_formula<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     formula: &NegativeFormula<'src, Term<'src>>,
-    args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    instructions: &mut Vec<Instruction>,
-    is_effect: bool,
+    context: &mut Context,
+    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
+    // compiled_action_count: usize,
+    // instructions: &mut Vec<Instruction>,
+    // state_inertia: &mut Vec<StateInertia>,
+    // is_effect: bool,
 ) -> Result<(), Error<'src>> {
     match formula {
-        NegativeFormula::Direct(af) => {
-            visit_term_atomic_formula(pass_data, af, args, instructions, is_effect)
-        }
+        NegativeFormula::Direct(af) => visit_term_atomic_formula(pass_data, af, context),
         NegativeFormula::Not(af) => {
-            if is_effect {
-                instructions.push(Instruction::Not);
+            context.set_negative();
+            if context.is_effect() {
+                // Effect sets state, so we need to invert stack value first, then set it
+                context.instructions_mut().push(Instruction::Not);
+                visit_term_atomic_formula(pass_data, af, context)
+            } else {
+                // Precondition reads state, so we need to read it first, then invert it on the stack
+                visit_term_atomic_formula(pass_data, af, context)?;
+                context.instructions_mut().push(Instruction::Not);
+                Ok(())
             }
-            visit_term_atomic_formula(pass_data, af, args, instructions, is_effect)?;
-            if !is_effect {
-                instructions.push(Instruction::Not);
-            }
-            Ok(())
         }
     }
 }
 
 fn visit_name_negative_formula<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     formula: &NegativeFormula<'src, Name<'src>>,
     instructions: &mut Vec<Instruction>,
 ) -> Result<(), Error<'src>> {
@@ -284,12 +483,11 @@ fn visit_name_negative_formula<'src>(
 }
 
 fn visit_fexp<'src>(
-    _: &FirstPassData<'src>,
     fexp: &FluentExpression<'src>,
-    instructions: &mut Vec<Instruction>,
+    context: &mut Context,
 ) -> Result<(), Error<'src>> {
     match fexp {
-        FluentExpression::Number(n) => instructions.push(Instruction::Push(*n)),
+        FluentExpression::Number(n) => context.instructions_mut().push(Instruction::Push(*n)),
         FluentExpression::Subtract(_) => todo!(),
         FluentExpression::Negate(_) => todo!(),
         FluentExpression::Divide(_) => todo!(),
@@ -300,27 +498,39 @@ fn visit_fexp<'src>(
     Ok(())
 }
 
-enum SupportedFunctionOp {
-    INC,
-}
-fn function_op<'src>(
-    pass_data: &FirstPassData<'src>,
+fn read_function<'src>(
+    pass_data: &DomainData<'src>,
     function: &FunctionTerm<'src>,
-    fexp: &FluentExpression<'src>,
-    op: SupportedFunctionOp,
-    instructions: &mut Vec<Instruction>,
+    context: &mut Context,
 ) -> Result<(), Error<'src>> {
-    visit_fexp(pass_data, fexp, instructions)?;
     if function.terms.len() == 0
         && function.name.1 == "total-cost"
-        && pass_data.preprocess.requirements.contains(Requirement::ActionCosts)
+        && pass_data.requirements.contains(Requirement::ActionCosts)
     {
-        use SupportedFunctionOp::*;
-        instructions.push(Instruction::ReadFunction(0)); // todo! map functions
-        match op {
-            INC => instructions.push(Instruction::Add),
-        }
-        instructions.push(Instruction::SetFunction(0));
+        context
+            .instructions_mut()
+            .push(Instruction::ReadFunction(0)); // todo! map functions
+        Ok(())
+    } else {
+        Err(Error {
+            input: None,
+            kind: ErrorKind::UnsetRequirement(Requirement::ActionCosts.into()),
+            chain: None,
+            range: function.range(),
+        })
+    }
+}
+
+fn set_function<'src>(
+    pass_data: &DomainData<'src>,
+    function: &FunctionTerm<'src>,
+    context: &mut Context,
+) -> Result<(), Error<'src>> {
+    if function.terms.len() == 0
+        && function.name.1 == "total-cost"
+        && pass_data.requirements.contains(Requirement::ActionCosts)
+    {
+        context.instructions_mut().push(Instruction::SetFunction(0)); // todo! map functions
         Ok(())
     } else {
         Err(Error {
@@ -333,41 +543,250 @@ fn function_op<'src>(
 }
 
 fn visit_effect<'src>(
-    pass_data: &FirstPassData<'src>,
+    pass_data: &DomainData<'src>,
     effect: &Effect<'src>,
-    args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    instructions: &mut Vec<Instruction>,
+    context: &mut Context,
+    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
+    // compiled_action_count: usize,
+    // instructions: &mut Vec<Instruction>,
+    // state_inertia: &mut Vec<StateInertia>,
 ) -> Result<(), Error<'src>> {
     match effect {
         Effect::And(vec) => {
             for effect in vec {
-                visit_effect(pass_data, effect, args, instructions)?
+                visit_effect(pass_data, effect, context)?
             }
             Ok(())
         }
         Effect::Forall(_) => todo!(),
         Effect::When(_) => todo!(),
-        Effect::NegativeFormula(f) => {
-            instructions.push(Instruction::And(0));
-            visit_term_negative_formula(pass_data, f, args, instructions, true)
+        Effect::NegativeFormula(formula) => {
+            context.instructions_mut().push(Instruction::And(0));
+            visit_term_negative_formula(pass_data, formula, context)
         }
         Effect::Assign(_, _) => todo!(),
         Effect::AssignTerm(_, _) => todo!(),
         Effect::AssignUndefined(_) => todo!(),
         Effect::ScaleUp(_, _) => todo!(),
         Effect::ScaleDown(_, _) => todo!(),
-        Effect::Increase(function, fexp) => function_op(
-            pass_data,
-            function,
-            &fexp.1,
-            SupportedFunctionOp::INC,
-            instructions,
-        ),
+        Effect::Increase(function, fexp) => {
+            visit_fexp(&fexp.1, context)?;
+            read_function(pass_data, function, context)?;
+            context.instructions_mut().push(Instruction::Push(1));
+            context.instructions_mut().push(Instruction::Add);
+            set_function(pass_data, function, context)
+        }
         Effect::Decrease(_, _) => todo!(),
     }
 }
 
 #[cfg(test)]
 mod test {
+    use enumset::EnumSet;
 
+    use super::*;
+    use crate::compiler::{action_graph::TryNode, parse_domain};
+
+    const DOMAIN_SRC: &str = "(define (domain inertia) 
+    (:predicates (one ?a) (two ?a ?b))
+    (:action a1 :parameters (?a ?b) :precondition (one ?a) :effect (and (not (one ?a)) (two ?a ?b)))
+    (:action a2 :parameters (?a ?b) :precondition(not (two ?a ?b)) :effect (and (one ?a) (one ?b)))
+    )";
+    const PROBLEM_SRC: &str = "(define (problem inertia) (:domain inertia) (:objects one two three)
+     (:init (one one) (one two) (two two three)) (:goal (one three)))";
+
+    #[test]
+    fn test_compiled_action_graph() {
+        let domain = parse_domain(DOMAIN_SRC).unwrap();
+        let problem = parse_problem(PROBLEM_SRC, EnumSet::EMPTY).unwrap();
+        let mut preprocess = preprocess(&domain, &problem).unwrap();
+        let (actions, state_inertia) = create_concrete_actions(&mut preprocess, &domain).unwrap();
+        use Instruction::*;
+        let one = (54..57, "one");
+        let two = (58..61, "two");
+        let three = (62..67, "three");
+        assert_eq!(
+            actions[0],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![one.clone(), one.clone()],
+                precondition: vec![ReadState(0)],
+                effect: vec![And(0), Not, SetState(0), And(0), SetState(3)]
+            }
+        );
+        assert_eq!(
+            actions[1],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![two.clone(), one.clone()],
+                precondition: vec![ReadState(1)],
+                effect: vec![And(0), Not, SetState(1), And(0), SetState(4)]
+            }
+        );
+        assert_eq!(
+            actions[2],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![three.clone(), one.clone()],
+                precondition: vec![ReadState(2)],
+                effect: vec![And(0), Not, SetState(2), And(0), SetState(5)]
+            }
+        );
+        assert_eq!(
+            actions[3],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![one.clone(), two.clone()],
+                precondition: vec![ReadState(0)],
+                effect: vec![And(0), Not, SetState(0), And(0), SetState(6)]
+            }
+        );
+        assert_eq!(
+            actions[4],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![two.clone(), two.clone()],
+                precondition: vec![ReadState(1)],
+                effect: vec![And(0), Not, SetState(1), And(0), SetState(7)]
+            }
+        );
+        assert_eq!(
+            actions[5],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![three.clone(), two.clone()],
+                precondition: vec![ReadState(2)],
+                effect: vec![And(0), Not, SetState(2), And(0), SetState(8)]
+            }
+        );
+        assert_eq!(
+            actions[6],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![one.clone(), three.clone()],
+                precondition: vec![ReadState(0)],
+                effect: vec![And(0), Not, SetState(0), And(0), SetState(9)]
+            }
+        );
+        assert_eq!(
+            actions[7],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![two.clone(), three.clone()],
+                precondition: vec![ReadState(1)],
+                effect: vec![And(0), Not, SetState(1), And(0), SetState(10)]
+            }
+        );
+        assert_eq!(
+            actions[8],
+            CompiledAction {
+                domain_action_idx: 0,
+                args: vec![three.clone(), three.clone()],
+                precondition: vec![ReadState(2)],
+                effect: vec![And(0), Not, SetState(2), And(0), SetState(11)]
+            }
+        );
+        assert_eq!(
+            actions[9],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![one.clone(), one.clone()],
+                precondition: vec![ReadState(3), Not],
+                effect: vec![And(0), SetState(0), And(0), SetState(0)]
+            }
+        );
+        assert_eq!(
+            actions[10],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![two.clone(), one.clone()],
+                precondition: vec![ReadState(4), Not],
+                effect: vec![And(0), SetState(1), And(0), SetState(0)]
+            }
+        );
+        assert_eq!(
+            actions[11],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![three.clone(), one.clone()],
+                precondition: vec![ReadState(5), Not],
+                effect: vec![And(0), SetState(2), And(0), SetState(0)]
+            }
+        );
+        assert_eq!(
+            actions[12],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![one.clone(), two.clone()],
+                precondition: vec![ReadState(6), Not],
+                effect: vec![And(0), SetState(0), And(0), SetState(1)]
+            }
+        );
+        assert_eq!(
+            actions[13],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![two.clone(), two.clone()],
+                precondition: vec![ReadState(7), Not],
+                effect: vec![And(0), SetState(1), And(0), SetState(1)]
+            }
+        );
+        assert_eq!(
+            actions[14],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![three.clone(), two.clone()],
+                precondition: vec![ReadState(8), Not],
+                effect: vec![And(0), SetState(2), And(0), SetState(1)]
+            }
+        );
+        assert_eq!(
+            actions[15],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![one.clone(), three.clone()],
+                precondition: vec![ReadState(9), Not],
+                effect: vec![And(0), SetState(0), And(0), SetState(2)]
+            }
+        );
+        assert_eq!(
+            actions[16],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![two.clone(), three.clone()],
+                precondition: vec![ReadState(10), Not],
+                effect: vec![And(0), SetState(1), And(0), SetState(2)]
+            }
+        );
+        assert_eq!(
+            actions[17],
+            CompiledAction {
+                domain_action_idx: 1,
+                args: vec![three.clone(), three.clone()],
+                precondition: vec![ReadState(11), Not],
+                effect: vec![And(0), SetState(2), And(0), SetState(2)]
+            }
+        );
+        assert_eq!(actions.len(), 18);
+        use TryNode::*;
+        // assert_eq!(action_graph[0], Vec::new());
+        // assert_eq!(action_graph[1], Vec::new());
+        // assert_eq!(action_graph[2], Vec::new());
+        // assert_eq!(action_graph[3], Vec::new());
+        // assert_eq!(action_graph[4], Vec::new());
+        // assert_eq!(action_graph[5], Vec::new());
+        // assert_eq!(action_graph[6], Vec::new());
+        // assert_eq!(action_graph[7], Vec::new());
+        // assert_eq!(action_graph[8], Vec::new());
+        // assert_eq!(action_graph[9], vec![Action(0), Action(3), Action(6), PreemptionPoint]);
+        // assert_eq!(action_graph[10], vec![Action(0), Action(1), Action(3), Action(6), Action(7), PreemptionPoint]);
+        // assert_eq!(action_graph[11], vec![Action(0), Action(2), Action(3), Action(5), Action(6), Action(8), PreemptionPoint]);
+        // assert_eq!(action_graph[12], vec![Action(3), PreemptionPoint]);
+        // assert_eq!(action_graph[13], vec![Action(4), PreemptionPoint]);
+        // assert_eq!(action_graph[14], vec![Action(5), PreemptionPoint]);
+        // assert_eq!(action_graph[15], vec![Action(6), PreemptionPoint]);
+        // assert_eq!(action_graph[16], vec![Action(7), PreemptionPoint]);
+        // assert_eq!(action_graph[17], vec![Action(8), PreemptionPoint]);
+        // assert_eq!(action_graph.len(), 18);
+    }
 }

@@ -2,13 +2,16 @@ use std::{collections::HashMap, ops::Range};
 
 use enumset::EnumSet;
 
-use crate::{Requirement, Error, ErrorKind};
-use super::{Name, Domain, Problem, List, Type, AtomicFSkeleton, for_all_type_object_permutations};
+use super::{
+    action_graph::TryNodeList, for_all_type_object_permutations, inertia::StateInertia,
+    AtomicFSkeleton, Domain, List, Name, Problem, Type,
+};
+use crate::{Error, ErrorKind, Requirement};
 
-
-/// Logical structures for compiling PDDL problems. 
-#[derive(Debug)]
-pub struct PreprocessData<'src> {
+/// Logical structures for compiling PDDL problems.
+#[derive(Debug, PartialEq)]
+pub struct DomainData<'src> {
+    /// Domain and problem requirements
     pub requirements: EnumSet<Requirement>,
     /// Type inheritance tree. Everything should end up being an object.
     pub type_tree: HashMap<&'src str, Name<'src>>,
@@ -23,9 +26,19 @@ pub struct PreprocessData<'src> {
     pub object_src_pos: HashMap<&'src str, Range<usize>>,
     /// Mapping a vector of `[predicate, arg1, arg2, .., argN]` to a memory bit offset.
     pub predicate_memory_map: HashMap<Vec<&'src str>, usize>,
+    // Optimization structures:
+    /// If valid - this vector should be same size as [`DomainData`].predicate_memory_map
+    /// Each offset in this vector matches the offset of state memory
+    pub state_inertia: Vec<StateInertia>,
+    /// If valid - this vector should be same size as [`CompiledProblem`].actions
+    /// Each offset in this vector matches the offset of compiled action list vector.
+    pub action_graph: Vec<TryNodeList>,
 }
 
-pub fn preprocess<'src>(domain:&Domain<'src>, problem:&Problem<'src>) -> Result<PreprocessData<'src>, Error<'src>> {
+pub fn preprocess<'src>(
+    domain: &Domain<'src>,
+    problem: &Problem<'src>,
+) -> Result<DomainData<'src>, Error<'src>> {
     validate_problem(domain, problem)?;
     map_objects(domain, problem)
 }
@@ -55,7 +68,7 @@ fn validate_problem<'src>(
 fn map_objects<'src>(
     domain: &Domain<'src>,
     problem: &Problem<'src>,
-) -> Result<PreprocessData<'src>, Error<'src>> {
+) -> Result<DomainData<'src>, Error<'src>> {
     let requirements = domain.requirements | problem.requirements;
     let mut type_tree = HashMap::new();
     let mut type_src_pos = HashMap::new();
@@ -118,7 +131,7 @@ fn map_objects<'src>(
             Ok(())
         })?;
     }
-    Ok(PreprocessData {
+    Ok(DomainData {
         requirements,
         type_tree,
         type_src_pos,
@@ -126,6 +139,8 @@ fn map_objects<'src>(
         type_to_objects_map,
         object_src_pos,
         predicate_memory_map,
+        state_inertia: Vec::new(),
+        action_graph: Vec::new(),
     })
 }
 
@@ -137,7 +152,7 @@ mod test {
     fn get_tiny_domain() -> (Domain<'static>, Problem<'static>) {
         let domain = parse_domain(
             "(define (domain unit-test)
-                (:predicates (a ?one) (b ?one ?two))
+                (:predicates (pa ?one) (pb ?one ?two))
                 (:action aOne :parameters(?one ?two) 
                     :precondition(and (a ?one) (b ?one ?two) (a ?two))
                     :effect (and (not (a ?one)) (not (a ?two)))
@@ -164,18 +179,18 @@ mod test {
         assert_eq!(
             compiler.predicate_memory_map,
             HashMap::<Vec<&str>, usize>::from([
-                (vec!["a", "a"], 0),
-                (vec!["a", "b"], 1),
-                (vec!["a", "c"], 2),
-                (vec!["b", "a", "a"], 3),
-                (vec!["b", "b", "a"], 4),
-                (vec!["b", "c", "a"], 5),
-                (vec!["b", "a", "b"], 6),
-                (vec!["b", "b", "b"], 7),
-                (vec!["b", "c", "b"], 8),
-                (vec!["b", "a", "c"], 9),
-                (vec!["b", "b", "c"], 10),
-                (vec!["b", "c", "c"], 11),
+                (vec!["pa", "a"], 0),
+                (vec!["pa", "b"], 1),
+                (vec!["pa", "c"], 2),
+                (vec!["pb", "a", "a"], 3),
+                (vec!["pb", "b", "a"], 4),
+                (vec!["pb", "c", "a"], 5),
+                (vec!["pb", "a", "b"], 6),
+                (vec!["pb", "b", "b"], 7),
+                (vec!["pb", "c", "b"], 8),
+                (vec!["pb", "a", "c"], 9),
+                (vec!["pb", "b", "c"], 10),
+                (vec!["pb", "c", "c"], 11),
             ])
         )
     }

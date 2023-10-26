@@ -1,15 +1,18 @@
 use std::{collections::HashMap, slice::Iter};
 
-mod preprocess;
-use preprocess::{preprocess, PreprocessData};
-mod first_pass;
-use first_pass::first_pass;
+mod domain_data;
+use domain_data::{preprocess, DomainData};
 mod final_pass;
 use final_pass::final_pass;
+
+// optimization mods
+mod action_graph;
+mod inertia;
 
 pub use crate::parser::{ast::*, *};
 use crate::{Error, ErrorKind};
 
+use self::action_graph::TryNodeList;
 
 /// Primitive bytecode needed to check action preconditions and apply effects to a "state"(memory).
 #[derive(Debug, PartialEq)]
@@ -142,15 +145,20 @@ pub struct CompiledProblem<'src> {
     pub init: Vec<Instruction>,
     /// Executable bytecode to check if the goal is met
     pub goal: Vec<Instruction>,
+
+    // Optimization structures:
+    /// Map of a callable action (name + args vector) to a ordered list of
+    /// suggested actions to try and preemtion points between them.
+    pub action_graph: Vec<TryNodeList>,
 }
 
 /// Flatenned representation of Actions inside [`CompiledProblem`]s
 /// All instruction offsets point to shared memory
 #[derive(Debug, PartialEq)]
 pub struct CompiledAction<'src> {
-    /// Name of the domain action (along with range of that name in the source code,
+    /// Offset into [`Domain`].actions vector pointing to source of this action,
     /// in case you need to display a message pointing to that PDDL code location).
-    pub name: Name<'src>,
+    pub domain_action_idx: usize,
     /// Exect object arguments bound to this action. PDDL actions use types to permutate themselves
     /// over various objects. CompiledActions are bound to exact objcts.
     pub args: Vec<Name<'src>>,
@@ -167,8 +175,7 @@ pub fn compile_problem<'src>(
     problem: &Problem<'src>,
 ) -> Result<CompiledProblem<'src>, Error<'src>> {
     let preprocess_data = preprocess(domain, problem)?;
-    let first_pass_data = first_pass(preprocess_data, domain, problem)?;
-    final_pass(&first_pass_data, domain, problem)
+    final_pass(preprocess_data, domain, problem)
 }
 
 /// Given a list of types, use a type to object map and generate all possible
@@ -207,6 +214,11 @@ where
     ) -> bool {
         if let Some(arg) = iterators[pos].1.next() {
             args[pos].1 = arg;
+            for (i, it) in iterators.iter().enumerate() {
+                if args[i] == args[pos] && i != pos && it.0 == iterators[pos].0 {
+                    return _args_iter(type_to_objects, iterators, args, pos);
+                }
+            }
             true
         } else if pos + 1 < iterators.len() {
             let kind = iterators[pos].0;
@@ -265,6 +277,26 @@ where
         }
     }
     // Itereate until the most significant iterator is done, calling closure over populated args
+    let mut is_found_collision = false;
+    loop {
+        for (i, it) in iterators.iter().enumerate() {
+            if args[i] == args[0] && i != 0 && it.0 == iterators[0].0 {
+                is_found_collision = true;
+                break;
+            }
+        }
+        if is_found_collision {
+            _args_iter(
+                type_to_objects,
+                iterators.as_mut_slice(),
+                args.as_mut_slice(),
+                0,
+            );
+            is_found_collision = false;
+        } else {
+            break;
+        }
+    }
     let mut result = vec![f(args.as_slice())?];
     while _args_iter(
         type_to_objects,
@@ -276,8 +308,6 @@ where
     }
     Ok(result)
 }
-
-
 
 #[cfg(test)]
 pub mod tests {
@@ -311,7 +341,6 @@ pub mod tests {
         (domain, problem)
     }
 
-    
     #[test]
     fn test_action() {
         use Instruction::*;
@@ -325,55 +354,55 @@ pub mod tests {
             problem.actions,
             vec![
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(90..91, "a"), (90..91, "a")], // a a
                     precondition: vec![ReadState(0), ReadState(3), ReadState(0), And(3)],
                     effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(0)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(92..93, "b"), (90..91, "a")], // b a
                     precondition: vec![ReadState(1), ReadState(4), ReadState(0), And(3)],
                     effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(0)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(94..95, "c"), (90..91, "a")], // c a
                     precondition: vec![ReadState(2), ReadState(5), ReadState(0), And(3)],
                     effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(0)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(90..91, "a"), (92..93, "b")], // a b
                     precondition: vec![ReadState(0), ReadState(6), ReadState(1), And(3)],
                     effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(1)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(92..93, "b"), (92..93, "b")], // b b
                     precondition: vec![ReadState(1), ReadState(7), ReadState(1), And(3)],
                     effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(1)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(94..95, "c"), (92..93, "b")], // c b
                     precondition: vec![ReadState(2), ReadState(8), ReadState(1), And(3)],
                     effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(1)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(90..91, "a"), (94..95, "c")], // a c
                     precondition: vec![ReadState(0), ReadState(9), ReadState(2), And(3)],
                     effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(2)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(92..93, "b"), (94..95, "c")], // b c
                     precondition: vec![ReadState(1), ReadState(10), ReadState(2), And(3)],
                     effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(2)]
                 },
                 CompiledAction {
-                    name: (105..109, "aOne"),
+                    domain_action_idx: 0,
                     args: vec![(94..95, "c"), (94..95, "c")], // c c
                     precondition: vec![ReadState(2), ReadState(11), ReadState(2), And(3)],
                     effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(2)]

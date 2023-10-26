@@ -23,7 +23,7 @@
 //!
 //! ```rust
 //! use std::fs;
-//! use pddl_rs::{compiler::{CompiledProblem, compile_problem}, search::a_star, parser::{parse_domain, parse_problem}};
+//! use pddl_rs::{compiler::{CompiledProblem, compile_problem}, search::a_star, parser::{parse_domain, parse_problem, ast::Action}};
 //! let domain_filename = "sample_problems/simple_domain.pddl";
 //! let problem_filename = "sample_problems/simple_problem.pddl";
 //! let domain_src = fs::read_to_string(domain_filename).unwrap();
@@ -45,7 +45,7 @@
 //! println!("Solution is {} actions long.", solution.len());
 //! for action_id in &solution {
 //!     let action = c_problem.actions.get(*action_id).unwrap();
-//!     println!("\t{}{:?}", action.name.1, action.args.iter().map(|(_, s)| *s).collect::<Vec<&str>>());
+//!     println!("\t{}{:?}", match &domain.actions[action.domain_action_idx]{ Action::Basic(ba)=>ba.name.1, _=> todo!() }, action.args.iter().map(|(_, s)| *s).collect::<Vec<&str>>());
 //! }
 //! ```
 //!
