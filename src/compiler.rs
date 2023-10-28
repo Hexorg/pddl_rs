@@ -2,20 +2,23 @@ use std::{collections::HashMap, slice::Iter};
 
 mod domain_data;
 use domain_data::{preprocess, DomainData};
+mod first_pass;
 mod final_pass;
+use enumset::{EnumSet, EnumSetType};
 use final_pass::final_pass;
 
 // optimization mods
-mod action_graph;
+pub mod action_graph;
 mod inertia;
 
 pub use crate::parser::{ast::*, *};
 use crate::{Error, ErrorKind};
 
-use self::action_graph::TryNodeList;
+use self::action_graph::ActionGraph;
+
 
 /// Primitive bytecode needed to check action preconditions and apply effects to a "state"(memory).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Instruction {
     ReadState(usize),
     SetState(usize),
@@ -59,12 +62,12 @@ impl Value {
 
 /// Helper trait to easier manage `Vec<Instruction>` fields of actions.
 pub trait Runnable {
-    fn run(&self, state: &[bool], functions: &[i64]) -> bool;
-    fn run_mut(&self, state: &mut [bool], functions: &mut [i64]);
+    fn run(self, state: &[bool], functions: &[i64]) -> bool;
+    fn run_mut(self, state: &mut [bool], functions: &mut [i64]);
 }
 
-impl Runnable for Vec<Instruction> {
-    fn run(&self, state: &[bool], _: &[i64]) -> bool {
+impl Runnable for &[Instruction] {
+    fn run(self, state: &[bool], _: &[i64]) -> bool {
         let mut stack = Vec::<Value>::with_capacity(512);
         for instruction in self {
             match instruction {
@@ -94,7 +97,7 @@ impl Runnable for Vec<Instruction> {
         stack.pop().unwrap_or_default().unwrap_bool()
     }
 
-    fn run_mut(&self, state: &mut [bool], functions: &mut [i64]) {
+    fn run_mut(self, state: &mut [bool], functions: &mut [i64]) {
         let mut stack = Vec::<Value>::with_capacity(512);
         for instruction in self {
             match instruction {
@@ -149,12 +152,12 @@ pub struct CompiledProblem<'src> {
     // Optimization structures:
     /// Map of a callable action (name + args vector) to a ordered list of
     /// suggested actions to try and preemtion points between them.
-    pub action_graph: Vec<TryNodeList>,
+    pub action_graph: ActionGraph,
 }
 
 /// Flatenned representation of Actions inside [`CompiledProblem`]s
 /// All instruction offsets point to shared memory
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CompiledAction<'src> {
     /// Offset into [`Domain`].actions vector pointing to source of this action,
     /// in case you need to display a message pointing to that PDDL code location).
@@ -168,14 +171,39 @@ pub struct CompiledAction<'src> {
     pub effect: Vec<Instruction>,
 }
 
+impl<'src> CompiledAction<'src> {
+    pub fn new() -> Self {
+        Self { domain_action_idx: 0, args: Vec::new(), precondition: Vec::new(), effect: Vec::new() }
+    }
+}
+
+/// Enumeration of various optimizations implemented in the compiler
+/// to allow for automatic swithching of them on and off.
+#[derive(EnumSetType, Debug)]
+pub enum Optimization {
+    /// Following the Koehler, Jana, and Jörg Hoffmann. "On the Instantiation of ADL Operators Involving Arbitrary First-Order Formulas." PuK. 2000. [paper](https://www.researchgate.net/profile/Jana-Koehler-2/publication/220916196_On_the_Instantiation_of_ADL_Operators_Involving_Arbitrary_First-Order_Formulas/links/53f5c12c0cf2fceacc6f65e0/On-the-Instantiation-of-ADL-Operators-Involving-Arbitrary-First-Order-Formulas.pdf),
+    /// Inertia allows us to start pruning unused states, actions, and instatiate basic action-graphs allowing us to skip many dead-end states.
+    Inertia,
+}
+
+impl Optimization {
+    pub fn none() -> EnumSet<Self> {
+        EnumSet::EMPTY
+    }
+    pub fn all() -> EnumSet<Self> {
+        EnumSet::ALL
+    }
+}
+
 /// Compile and optimize parsed [`Domain`] and [`Problem`] structures into a compiled problem ready for using in search methods.
 /// Load them from a file using [`parse_domain`] and [`parse_problem`] functions.
 pub fn compile_problem<'src>(
     domain: &Domain<'src>,
     problem: &Problem<'src>,
+    optimizations: EnumSet<Optimization>
 ) -> Result<CompiledProblem<'src>, Error<'src>> {
     let preprocess_data = preprocess(domain, problem)?;
-    final_pass(preprocess_data, domain, problem)
+    final_pass(preprocess_data, domain, problem, optimizations)
 }
 
 /// Given a list of types, use a type to object map and generate all possible
@@ -195,6 +223,17 @@ where
     F: FnMut(&[(&Name<'src>, &Name<'src>)]) -> Result<O, Error<'src>>,
 {
     use ErrorKind::UndefinedType;
+
+    fn _has_collition<'parent, 'src>(args: &[(&'parent Name<'src>, &'parent Name<'src>)], iterators: &[(&'src str, Iter<'parent, Name<'src>>)]) -> bool {
+        for i in 0..iterators.len() {
+            for j in 0..iterators.len() {
+                if args[i].1.1 == args[j].1.1 && i != j && iterators[i].0 == iterators[j].0 {
+                    return true
+                }
+            }
+        }
+        false
+    }
     /// Call the next iterator at the right position.
     /// If you think about converting binary to decimal:
     /// Position == 0 is the least significant iterator
@@ -206,6 +245,8 @@ where
     /// * `iterators` - iterators over object vectors in `type_to_objects` map.
     /// * `args` - "output" vector that's populated by world object permutations each
     /// time this function is called.
+    /// # Return:
+    /// Returns false when it's impossible to iterate more, true when we can keep going.
     fn _args_iter<'parent, 'src>(
         type_to_objects: &'parent HashMap<&'src str, Vec<Name<'src>>>,
         iterators: &mut [(&'src str, Iter<'parent, Name<'src>>)],
@@ -214,12 +255,12 @@ where
     ) -> bool {
         if let Some(arg) = iterators[pos].1.next() {
             args[pos].1 = arg;
-            for (i, it) in iterators.iter().enumerate() {
-                if args[i] == args[pos] && i != pos && it.0 == iterators[pos].0 {
-                    return _args_iter(type_to_objects, iterators, args, pos);
-                }
+            if pos==0 && _has_collition(args, iterators) {
+                _args_iter(type_to_objects, iterators, args, pos)
+            } else {
+                true
             }
-            true
+            // _no_collisions(type_to_objects, args, iterators, pos)
         } else if pos + 1 < iterators.len() {
             let kind = iterators[pos].0;
             if let Some(vec) = type_to_objects.get(kind) {
@@ -228,7 +269,12 @@ where
                     args[pos].1 = arg;
                 }
             }
-            _args_iter(type_to_objects, iterators, args, pos + 1)
+            let r = _args_iter(type_to_objects, iterators, args, pos + 1);
+            if r && pos==0 && _has_collition(args, iterators) {
+                _args_iter(type_to_objects, iterators, args, pos)
+            } else {
+                r
+            }
         } else {
             // We're done permutating
             false
@@ -277,27 +323,13 @@ where
         }
     }
     // Itereate until the most significant iterator is done, calling closure over populated args
-    let mut is_found_collision = false;
-    loop {
-        for (i, it) in iterators.iter().enumerate() {
-            if args[i] == args[0] && i != 0 && it.0 == iterators[0].0 {
-                is_found_collision = true;
-                break;
-            }
-        }
-        if is_found_collision {
-            _args_iter(
-                type_to_objects,
-                iterators.as_mut_slice(),
-                args.as_mut_slice(),
-                0,
-            );
-            is_found_collision = false;
-        } else {
-            break;
-        }
-    }
+    let r = if _has_collition(&args, &iterators) {
+        _args_iter(type_to_objects, iterators.as_mut_slice(), args.as_mut_slice(), 0)
+    } else {
+        true
+    };
     let mut result = vec![f(args.as_slice())?];
+    if !r {return Ok(result)}
     while _args_iter(
         type_to_objects,
         iterators.as_mut_slice(),
@@ -342,73 +374,135 @@ pub mod tests {
     }
 
     #[test]
+    fn test_permutations() {
+        let type_to_objects = HashMap::from([("object", vec![(0..0, "a"), (0..0, "b"), (0..0, "c"), (0..0, "d")])]);
+        let list = vec![List{ items:vec![(0..0, "var1"), (0..0, "var2"), (0..0, "var3")], kind: Type::None}];
+        let result = for_all_type_object_permutations(&type_to_objects, &list, |args| {
+            assert_eq!(args.len(), 3); 
+            Ok((args[0].1.1, args[1].1.1, args[2].1.1))
+        }).unwrap();
+        assert_eq!(result, vec![
+            // ("a", "a", "a"), 
+            // ("b", "a", "a"), 
+            // ("c", "a", "a"),
+            // ("d", "a", "a"), 
+            // ("a", "b", "a"), 
+            // ("b", "b", "a"), 
+            ("c", "b", "a"),
+            ("d", "b", "a"), 
+            // ("a", "c", "a"), 
+            ("b", "c", "a"), 
+            // ("c", "c", "a"),
+            ("d", "c", "a"),
+            // ("a", "d", "a"), 
+            ("b", "d", "a"), 
+            ("c", "d", "a"),
+            // ("d", "d", "a"),  
+            // ("a", "a", "b"), 
+            // ("b", "a", "b"), 
+            ("c", "a", "b"),
+            ("d", "a", "b"), 
+            // ("a", "b", "b"), 
+            // ("b", "b", "b"), 
+            // ("c", "b", "b"),
+            // ("d", "b", "b"), 
+            ("a", "c", "b"), 
+            // ("b", "c", "b"), 
+            // ("c", "c", "b"),
+            ("d", "c", "b"),
+            ("a", "d", "b"), 
+            // ("b", "d", "b"), 
+            ("c", "d", "b"),
+            // ("d", "d", "b"), 
+            // ("a", "a", "c"), 
+            ("b", "a", "c"), 
+            // ("c", "a", "c"),
+            ("d", "a", "c"), 
+            ("a", "b", "c"), 
+            // ("b", "b", "c"), 
+            // ("c", "b", "c"),
+            ("d", "b", "c"), 
+            // ("a", "c", "c"), 
+            // ("b", "c", "c"), 
+            // ("c", "c", "c"),
+            // ("d", "c", "c"),
+            ("a", "d", "c"), 
+            ("b", "d", "c"), 
+            // ("c", "d", "c"),
+            // ("d", "d", "c"), 
+            // ("a", "a", "d"), 
+            ("b", "a", "d"), 
+            ("c", "a", "d"),
+            // ("d", "a", "d"), 
+            ("a", "b", "d"), 
+            // ("b", "b", "d"), 
+            ("c", "b", "d"),
+            // ("d", "b", "d"), 
+            ("a", "c", "d"), 
+            ("b", "c", "d"), 
+            // ("c", "c", "d"),
+            // ("d", "c", "d"),
+            // ("a", "d", "d"), 
+            // ("b", "d", "d"), 
+            // ("c", "d", "d"),
+            // ("d", "d", "d"), 
+        ]);
+    }
+
+    #[test]
     fn test_action() {
         use Instruction::*;
         let (domain, problem) = get_tiny_domain();
-        let problem = compile_problem(&domain, &problem).unwrap();
-        assert_eq!(problem.memory_size, 12);
-        assert_eq!(problem.init, vec![And(0), SetState(0), And(0), SetState(6)]);
+        let problem = compile_problem(&domain, &problem, EnumSet::EMPTY).unwrap();
+        assert_eq!(problem.memory_size, 9);
+        assert_eq!(problem.init, vec![And(0), SetState(0), And(0), SetState(5)]);
         assert_eq!(problem.goal, vec![ReadState(0), Not]);
-        assert_eq!(problem.actions.len(), 9);
+        assert_eq!(problem.actions.len(), 6);
         assert_eq!(
-            problem.actions,
-            vec![
-                CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(90..91, "a"), (90..91, "a")], // a a
-                    precondition: vec![ReadState(0), ReadState(3), ReadState(0), And(3)],
-                    effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(0)]
-                },
+            problem.actions[0],
                 CompiledAction {
                     domain_action_idx: 0,
                     args: vec![(92..93, "b"), (90..91, "a")], // b a
-                    precondition: vec![ReadState(1), ReadState(4), ReadState(0), And(3)],
+                    precondition: vec![ReadState(1), ReadState(3), ReadState(0), And(3)],
                     effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(0)]
-                },
-                CompiledAction {
+                });
+        assert_eq!(
+            problem.actions[1],
+            CompiledAction {
                     domain_action_idx: 0,
                     args: vec![(94..95, "c"), (90..91, "a")], // c a
-                    precondition: vec![ReadState(2), ReadState(5), ReadState(0), And(3)],
+                    precondition: vec![ReadState(2), ReadState(4), ReadState(0), And(3)],
                     effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(0)]
-                },
-                CompiledAction {
+                });
+        assert_eq!(
+            problem.actions[2],
+            CompiledAction {
                     domain_action_idx: 0,
                     args: vec![(90..91, "a"), (92..93, "b")], // a b
-                    precondition: vec![ReadState(0), ReadState(6), ReadState(1), And(3)],
+                    precondition: vec![ReadState(0), ReadState(5), ReadState(1), And(3)],
                     effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(1)]
-                },
-                CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(92..93, "b"), (92..93, "b")], // b b
-                    precondition: vec![ReadState(1), ReadState(7), ReadState(1), And(3)],
-                    effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(1)]
-                },
-                CompiledAction {
+                });
+        assert_eq!(
+            problem.actions[3],CompiledAction {
                     domain_action_idx: 0,
                     args: vec![(94..95, "c"), (92..93, "b")], // c b
-                    precondition: vec![ReadState(2), ReadState(8), ReadState(1), And(3)],
+                    precondition: vec![ReadState(2), ReadState(6), ReadState(1), And(3)],
                     effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(1)]
-                },
-                CompiledAction {
+                });
+        assert_eq!(
+            problem.actions[4],CompiledAction {
                     domain_action_idx: 0,
                     args: vec![(90..91, "a"), (94..95, "c")], // a c
-                    precondition: vec![ReadState(0), ReadState(9), ReadState(2), And(3)],
+                    precondition: vec![ReadState(0), ReadState(7), ReadState(2), And(3)],
                     effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(2)]
-                },
-                CompiledAction {
+                });
+        assert_eq!(
+            problem.actions[5],CompiledAction {
                     domain_action_idx: 0,
                     args: vec![(92..93, "b"), (94..95, "c")], // b c
-                    precondition: vec![ReadState(1), ReadState(10), ReadState(2), And(3)],
+                    precondition: vec![ReadState(1), ReadState(8), ReadState(2), And(3)],
                     effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(2)]
-                },
-                CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(94..95, "c"), (94..95, "c")], // c c
-                    precondition: vec![ReadState(2), ReadState(11), ReadState(2), And(3)],
-                    effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(2)]
-                }
-            ]
-        );
+                });
     }
 
     #[test]

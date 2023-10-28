@@ -333,6 +333,16 @@ pub enum Action<'src> {
     Derived(AtomicFSkeleton<'src>, GD<'src>), // :derived−predicates
 }
 
+impl<'src> Action<'src> {
+    pub fn name(&self) -> Name<'src> {
+        match self {
+            Self::Basic(a) => a.name.clone(),
+            Self::Derived(predicate, _) => predicate.name.clone(),
+            Self::Durative(a) => a.name.clone()
+        }
+    }
+}
+
 /// Basic PDDL Action
 #[derive(PartialEq, Debug)]
 pub struct BasicAction<'src> {

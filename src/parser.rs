@@ -55,7 +55,7 @@ fn err_name<'src>(
                     .unwrap_or(0),
                 Many1(_) | UnclosedParenthesis(_) | Parenthesis => 1,
                 // Compiler errors:
-                MissmatchedDomain(_) | ExpectedVariable | ExpectedName | UndeclaredVariable
+                MissmatchedDomain(_) | UnreadPredicate(_) | UndeclaredVariable
                 | UndefinedType => panic!(),
             };
             if let ErrorKind::Nom(_) = old_e.kind {

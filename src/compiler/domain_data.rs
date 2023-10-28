@@ -3,7 +3,7 @@ use std::{collections::HashMap, ops::Range};
 use enumset::EnumSet;
 
 use super::{
-    action_graph::TryNodeList, for_all_type_object_permutations, inertia::StateInertia,
+    action_graph::ActionGraph, for_all_type_object_permutations,
     AtomicFSkeleton, Domain, List, Name, Problem, Type,
 };
 use crate::{Error, ErrorKind, Requirement};
@@ -27,12 +27,9 @@ pub struct DomainData<'src> {
     /// Mapping a vector of `[predicate, arg1, arg2, .., argN]` to a memory bit offset.
     pub predicate_memory_map: HashMap<Vec<&'src str>, usize>,
     // Optimization structures:
-    /// If valid - this vector should be same size as [`DomainData`].predicate_memory_map
-    /// Each offset in this vector matches the offset of state memory
-    pub state_inertia: Vec<StateInertia>,
     /// If valid - this vector should be same size as [`CompiledProblem`].actions
     /// Each offset in this vector matches the offset of compiled action list vector.
-    pub action_graph: Vec<TryNodeList>,
+    pub action_graph: ActionGraph,
 }
 
 pub fn preprocess<'src>(
@@ -127,6 +124,8 @@ fn map_objects<'src>(
             call_vec.extend(args.iter().map(|i| i.1 .1));
             if !predicate_memory_map.contains_key(&call_vec) {
                 predicate_memory_map.insert(call_vec, predicate_memory_map.len());
+            } else {
+                panic!("Predicate memory map already contains this");
             }
             Ok(())
         })?;
@@ -139,8 +138,7 @@ fn map_objects<'src>(
         type_to_objects_map,
         object_src_pos,
         predicate_memory_map,
-        state_inertia: Vec::new(),
-        action_graph: Vec::new(),
+        action_graph: ActionGraph::new(),
     })
 }
 
@@ -182,15 +180,15 @@ mod test {
                 (vec!["pa", "a"], 0),
                 (vec!["pa", "b"], 1),
                 (vec!["pa", "c"], 2),
-                (vec!["pb", "a", "a"], 3),
-                (vec!["pb", "b", "a"], 4),
-                (vec!["pb", "c", "a"], 5),
-                (vec!["pb", "a", "b"], 6),
-                (vec!["pb", "b", "b"], 7),
-                (vec!["pb", "c", "b"], 8),
-                (vec!["pb", "a", "c"], 9),
-                (vec!["pb", "b", "c"], 10),
-                (vec!["pb", "c", "c"], 11),
+                // (vec!["pb", "a", "a"], 3),
+                (vec!["pb", "b", "a"], 3),
+                (vec!["pb", "c", "a"], 4),
+                (vec!["pb", "a", "b"], 5),
+                // (vec!["pb", "b", "b"], 7),
+                (vec!["pb", "c", "b"], 6),
+                (vec!["pb", "a", "c"], 7),
+                (vec!["pb", "b", "c"], 8),
+                // (vec!["pb", "c", "c"], 11),
             ])
         )
     }

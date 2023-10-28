@@ -23,29 +23,22 @@
 //!
 //! ```rust
 //! use std::fs;
-//! use pddl_rs::{compiler::{CompiledProblem, compile_problem}, search::a_star, parser::{parse_domain, parse_problem, ast::Action}};
+//! use pddl_rs::{compiler::{CompiledProblem, compile_problem, Optimization}, search::{a_star, AstarInternals}, parser::{parse_domain, parse_problem, ast::Action}, ReportPrinter};
 //! let domain_filename = "sample_problems/simple_domain.pddl";
 //! let problem_filename = "sample_problems/simple_problem.pddl";
 //! let domain_src = fs::read_to_string(domain_filename).unwrap();
-//! let domain = match parse_domain(&domain_src) {
-//!     Err(e) => {e.report(domain_filename).eprint((domain_filename, ariadne::Source::from(&domain_src))); panic!() },
-//!     Ok(d) => d,
-//! };
+//! let domain = parse_domain(&domain_src).unwrap_or_print_report(domain_filename, &domain_src);
 //! let problem_src = fs::read_to_string(problem_filename).unwrap();
-//! let problem = match parse_problem(&problem_src, domain.requirements) {
-//!     Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src))); panic!() },
-//!     Ok(p) => p
-//! };
-//! let c_problem = match compile_problem(&domain, &problem) {
-//!     Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src))); panic!() },
-//!     Ok(cd) => cd,
-//! };
+//! let problem = parse_problem(&problem_src, domain.requirements).unwrap_or_print_report(problem_filename, &problem_src);
+//! let c_problem = compile_problem(&domain, &problem, Optimization::all()).unwrap_or_print_report(problem_filename, &problem_src);
 //! println!("Compiled problem needs {} bits of memory and uses {} actions.", c_problem.memory_size, c_problem.actions.len());
-//! let solution = a_star(&c_problem);
-//! println!("Solution is {} actions long.", solution.len());
-//! for action_id in &solution {
-//!     let action = c_problem.actions.get(*action_id).unwrap();
-//!     println!("\t{}{:?}", match &domain.actions[action.domain_action_idx]{ Action::Basic(ba)=>ba.name.1, _=> todo!() }, action.args.iter().map(|(_, s)| *s).collect::<Vec<&str>>());
+//! let mut args = AstarInternals::new();
+//! if let Some(solution) = a_star(&c_problem, &mut args) {
+//!     println!("Solution is {} actions long.", solution.len());
+//!     for action_id in &solution {
+//!         let action = c_problem.actions.get(*action_id).unwrap();
+//!         println!("\t{}{:?}", match &domain.actions[action.domain_action_idx]{ Action::Basic(ba)=>ba.name.1, _=> todo!() }, action.args.iter().map(|(_, s)| *s).collect::<Vec<&str>>());
+//! }
 //! }
 //! ```
 //!
@@ -86,8 +79,7 @@ enum ErrorKind<'src> {
     // Compiler Errors
     MissmatchedDomain(&'src str),
     UndefinedType,
-    ExpectedVariable,
-    ExpectedName,
+    UnreadPredicate(&'src str),
     UndeclaredVariable,
 }
 
@@ -121,6 +113,23 @@ impl<'src> nom::error::ParseError<parser::Input<'src>> for Error<'src> {
     }
 }
 
+pub trait ReportPrinter<O> {
+    fn unwrap_or_print_report(self, filename:&str, source:&str) -> O;
+} 
+
+impl<'src, O> ReportPrinter<O> for Result<O, Error<'src>> {
+    fn unwrap_or_print_report(self, filename:&str, source:&str) -> O {
+        match self {
+            Err(e) => {
+                e.report(filename)
+                    .eprint((filename, ariadne::Source::from(source))).unwrap();
+                panic!()
+            }
+            Ok(cd) => cd,
+        }
+    }
+}
+
 impl<'src> Error<'src> {
     pub fn unset_requirement(
         input: parser::Input<'src>,
@@ -136,7 +145,7 @@ impl<'src> Error<'src> {
 }
 
 impl<'src> Error<'src> {
-    fn make_label(&self, filename: &'static str) -> ariadne::Label<(&'src str, Range<usize>)> {
+    fn make_label(&self, filename: &'src str) -> ariadne::Label<(&'src str, Range<usize>)> {
         use ErrorKind::*;
         let label = ariadne::Label::new((filename, self.range.clone()));
         match self.kind {
@@ -174,14 +183,13 @@ impl<'src> Error<'src> {
                 name
             )),
             UndefinedType => label.with_message("Domain :types() does not declare this type."),
-            ExpectedVariable => label.with_message("Expected variable."),
             UndeclaredVariable => label.with_message("Undeclared variable."),
-            ExpectedName => label.with_message("Expected name."),
+            UnreadPredicate(v) => label.with_message(format!("Unused Predicate call: {:?}", v))
         }
     }
-    pub fn report(
+    pub fn report<'fname>(
         &self,
-        filename: &'static str,
+        filename: &'src str,
     ) -> ariadne::Report<'src, (&'src str, Range<usize>)> {
         use ErrorKind::*;
         let report = ariadne::Report::<'src, (&'src str, Range<usize>)>::build(
@@ -213,11 +221,30 @@ impl<'src> Error<'src> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod lib_tests {
     use ariadne::Source;
     use enumset::EnumSet;
+    use parser::{parse_domain, parse_problem};
 
-    use crate::parser::{self};
+    use crate::{parser, ReportPrinter, compiler::{compile_problem, Optimization}};
+
+    pub fn load_repo_pddl<'src>(
+        domain_filename: &'static str,
+        problem_filename: &'static str,
+    ) -> (String, String) {
+        use std::{env, fs, path::Path};
+        let workspace_path = match env::var("GITHUB_WORKSPACE") {
+            Ok(path) => path,
+            Err(_) => match env::var("CARGO_MANIFEST_DIR") {
+                Ok(path) => path,
+                Err(_) => String::from("."),
+            },
+        };
+        let p = Path::new(&workspace_path);
+        let domain_src = fs::read_to_string(p.join(domain_filename)).unwrap();
+        let problem_src = fs::read_to_string(p.join(problem_filename)).unwrap();
+        (domain_src, problem_src)
+    }
 
     #[test]
     fn test_domain() -> std::io::Result<()> {
@@ -231,13 +258,20 @@ mod tests {
             }
         }
         Ok(())
-        // let t:Option<Result<(), ()>> = Some(Err(()));
-        // let t = t.and_then(|r| r.or_else(|e| return Some(Err(e))));
-        // let mut parser = parser::Parser::new(code.as_str(), Some(filename));
-        // match parser.next() {
-        //     Some(Ok(s)) => println!("{:?}", s),
-        //     Some(Err(e)) => { println!("{}", e); assert!(false); },
-        //     None => assert!(false),
-        // }
+    }
+
+    #[test]
+    #[ignore = "Benchmark test to run manually"]
+    fn benchmark() {
+        let domain_filename = "sample_problems/barman/domain.pddl";
+        let problem_filename = "sample_problems/barman/problem_5_10_7.pddl";
+        let (domain_src, problem_src) = load_repo_pddl(domain_filename, problem_filename);
+        let domain = parse_domain(&domain_src).unwrap_or_print_report(domain_filename, &domain_src);
+        let problem = parse_problem(&problem_src, domain.requirements).unwrap_or_print_report(problem_filename, &problem_src);
+        let runs = [Optimization::none(), Optimization::all()];
+        for optimizations in runs {
+            let c_problem = compile_problem(&domain, &problem, optimizations).unwrap_or_print_report(problem_filename, &problem_src);
+            println!("At {:?}: {}.{} uses {} bits of memory and has {} actions.", optimizations, domain.name.1, problem.name.1, c_problem.memory_size, c_problem.actions.len());
+        }
     }
 }
