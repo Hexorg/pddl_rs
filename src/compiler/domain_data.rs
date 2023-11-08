@@ -38,10 +38,10 @@ pub struct DomainData<'src> {
     /// Set of all concrete atomic formulas that have been identified to stay true
     /// no matter what actions have been executed
     pub const_true_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
-    /// Set of all concrete atomic formulas that have been identified to stay false 
+    /// Set of all concrete atomic formulas that have been identified to stay false
     /// no matter what actions have been executed
     pub const_false_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
-    /// A map of AST Actions to Compiled action ranges. The range represents 
+    /// A map of AST Actions to Compiled action ranges. The range represents
     /// All possible calls of a given action (for permutated objects)
     pub compiled_action_ranges: Vec<Range<usize>>,
 }

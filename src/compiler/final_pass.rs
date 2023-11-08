@@ -12,7 +12,7 @@ enum ContextKind {
     Effect,
 }
 
-/// Gets passed to all AST visitors to keep track of inter-node state as we are 
+/// Gets passed to all AST visitors to keep track of inter-node state as we are
 /// traversing the Abstract Systax Tree
 struct Context<'src, 'ast, 'pass> {
     pub kind: ContextKind,

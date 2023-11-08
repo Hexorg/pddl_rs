@@ -8,7 +8,7 @@ use super::{
     PreconditionExpr, Problem, Term, Type, GD,
 };
 
-/// Compiler context that gets passed to all AST visitors to keep track of 
+/// Compiler context that gets passed to all AST visitors to keep track of
 /// inter-node state as we are traversing the Abstract Systax Tree
 struct Context<'ast, 'src> {
     pub is_negative: bool,
@@ -28,7 +28,7 @@ impl<'ast, 'src> Context<'ast, 'src> {
     }
 }
 
-/// First pass over the Abstract Syntax Tree - performs basic sanity checks, 
+/// First pass over the Abstract Syntax Tree - performs basic sanity checks,
 /// And populates structures needed for optimization of the [`CompiledProblem`]
 /// emitted in the [`final_pass`]
 pub fn first_pass<'src>(

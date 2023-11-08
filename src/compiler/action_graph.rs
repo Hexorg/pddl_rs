@@ -53,7 +53,7 @@ impl ActionGraph {
         }
     }
 
-    /// Given the action pair - modify the priority matrix to get the search algorithm 
+    /// Given the action pair - modify the priority matrix to get the search algorithm
     /// to check the `to` action right after `from` action.
     fn prioritize(&mut self, from: CompiledActionUsize, to: CompiledActionUsize) {
         let vec = &mut self.priority[from as usize];
