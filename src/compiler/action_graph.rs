@@ -7,6 +7,7 @@ use super::{inertia::Inertia, CompiledActionUsize};
 // use rand::seq::SliceRandom;
 
 #[derive(Debug, PartialEq)]
+/// A graph of actions to be executed in sequence to speed up domain planning.
 pub struct ActionGraph {
     /// The priority matrix of actions - a square matrix where N is the number of actions in domain
     /// (unexpanded to objects in a problem) The offset is the current action index,
@@ -22,7 +23,9 @@ impl ActionGraph {
         }
     }
 
+    /// Re-initializes the priority matrix to be action-index based. And `size`by`size` long.
     pub fn set_size(&mut self, size: usize) {
+        self.priority.clear();
         for _ in 0..size {
             let inner_vec: Vec<CompiledActionUsize> =
                 (0..size).map(|u| u as CompiledActionUsize).collect();
@@ -31,6 +34,8 @@ impl ActionGraph {
         }
     }
 
+    /// Re-arrange action priorities to try actions that are enabled by this action first
+    /// And actions that are disabled by this action - last
     pub fn apply_inertia<'src, O>(&mut self, inertia: &Vec<Inertia<O>>)
     where
         O: Eq + PartialEq + Hash,
@@ -48,6 +53,8 @@ impl ActionGraph {
         }
     }
 
+    /// Given the action pair - modify the priority matrix to get the search algorithm 
+    /// to check the `to` action right after `from` action.
     fn prioritize(&mut self, from: CompiledActionUsize, to: CompiledActionUsize) {
         let vec = &mut self.priority[from as usize];
         if let Some((idx, _)) = vec.iter().enumerate().find(|(_, dst)| (**dst) == to) {
@@ -56,6 +63,8 @@ impl ActionGraph {
         }
     }
 
+    /// Given the action pair - modify the priority matrix to get the search algorithm
+    /// to check the `to` action as the last one after `from` action.
     fn deprioritize(&mut self, from: CompiledActionUsize, to: CompiledActionUsize) {
         let vec = &mut self.priority[from as usize];
         if let Some((idx, _)) = vec.iter().enumerate().find(|(_, dst)| (**dst) == to) {

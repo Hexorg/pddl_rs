@@ -27,7 +27,9 @@ where
 }
 
 pub trait DomainInertia {
+    /// Check if action `from` enables any state that action `to` requires
     fn is_enables(&self, from: usize, to: usize) -> bool;
+    /// Check if action `from` disables any state that action `to` requires
     fn is_disables(&self, from: usize, to: usize) -> bool;
 }
 

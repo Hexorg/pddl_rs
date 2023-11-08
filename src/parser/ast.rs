@@ -9,6 +9,8 @@ use enumset::{EnumSet, EnumSetType};
 use crate::{compiler::PredicateUsize, ErrorKind};
 
 #[derive(PartialEq, Eq, Clone, Copy)]
+/// Span of an AST element in the source code. `start` and `end` represet byte-offsets in the source code
+/// Also keeps track if the AST element is in the problem source or domain.
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -63,10 +65,12 @@ impl<'src> Into<Range<usize>> for Span {
     }
 }
 
+/// Any AST Node that spans some source code characters.
 pub trait SpannedAst<'src> {
     fn span(&self) -> Span;
 }
 
+/// Any AST Node that spans some source code characters and allows that span to be changed.
 pub trait SpannedAstMut<'src>: SpannedAst<'src> {
     fn span_mut(&mut self) -> &mut Span;
 }

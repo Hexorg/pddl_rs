@@ -16,29 +16,20 @@ From PDDL4J's Readme:
 
 ```rust
 use std::fs;
-use pddl_rs::{compiler::{CompiledProblem, compile_problem}, search::a_star, parser::{parse_domain, parse_problem}};
-let domain_filename = "sample_problems/simple_domain.pddl";
-let problem_filename = "sample_problems/simple_problem.pddl"
-let domain_src = fs::read_to_string(domain_filename).unwrap();
-let domain = match parse_domain(&domain_src) {
-    Err(e) => {e.report(domain_filename).eprint((domain_filename, ariadne::Source::from(&domain_src))); panic!() },
-    Ok(d) => d,
-};
-let problem_src = fs::read_to_string(problem_filename).unwrap();
-let problem = match parse_problem(&problem_src, domain.requirements) {
-    Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src))); panic!() },
-    Ok(p) => p
-};
-let c_problem = match compile_problem(&domain, &problem) {
-    Err(e) => {e.report(problem_filename).eprint((problem_filename, ariadne::Source::from(&problem_src))); panic!() },
-    Ok(cd) => cd,
-};
+use std::path::PathBuf;
+use pddl_rs::{Sources, Objects, search::{a_star, AstarInternals}};
+let domain_filename = PathBuf::from("sample_problems/simple_domain.pddl");
+let problem_filename = PathBuf::from("sample_problems/simple_problem.pddl");
+let sources = Sources::load(domain_filename, problem_filename);
+let (domain, problem, c_problem) = sources.compile();
 println!("Compiled problem needs {} bits of memory and uses {} actions.", c_problem.memory_size, c_problem.actions.len());
-let solution = a_star(&c_problem);
-println!("Solution is {} actions long.", solution.len());
-for action_id in &solution {
-    let action = c_problem.actions.get(*action_id).unwrap();
-    println!("\t{}{:?}", action.name.1, action.args.iter().map(|(_, s)| *s).collect::<Vec<&str>>());
+let mut args = AstarInternals::new();
+if let Some(solution) = a_star(&c_problem, &mut args) {
+    println!("Solution is {} actions long.", solution.len());
+    for action_id in &solution {
+        let action = c_problem.actions.get(*action_id as usize).unwrap();
+        println!("\t{}{:?}", domain.actions[action.domain_action_idx as usize].name(), action.args.iter().map(|(row, col)| problem.objects.get_object(*row,*col).item.1).collect::<Vec<&str>>());
+}
 }
 ```
 

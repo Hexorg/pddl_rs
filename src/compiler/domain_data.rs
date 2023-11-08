@@ -33,9 +33,16 @@ pub struct DomainData<'src> {
     // Optimization structures:
     /// Each offset in this vector matches the offset of action list vector.
     pub action_graph: ActionGraph,
+    /// Set of all predicate names that have been identified as constant
     pub constant_predicates: HashSet<Name<'src>>,
+    /// Set of all concrete atomic formulas that have been identified to stay true
+    /// no matter what actions have been executed
     pub const_true_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
+    /// Set of all concrete atomic formulas that have been identified to stay false 
+    /// no matter what actions have been executed
     pub const_false_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
+    /// A map of AST Actions to Compiled action ranges. The range represents 
+    /// All possible calls of a given action (for permutated objects)
     pub compiled_action_ranges: Vec<Range<usize>>,
 }
 

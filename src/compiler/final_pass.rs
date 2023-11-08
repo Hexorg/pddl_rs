@@ -5,11 +5,15 @@ use super::{inertia::Inertia, *};
 #[derive(PartialEq, Eq)]
 enum ContextKind {
     Goal,
+    /// The argument is the ID of this Action in the Domain's action vector
+    /// (without concrete object calls).
     Action(ASTActionUsize),
     Precondition,
     Effect,
 }
 
+/// Gets passed to all AST visitors to keep track of inter-node state as we are 
+/// traversing the Abstract Systax Tree
 struct Context<'src, 'ast, 'pass> {
     pub kind: ContextKind,
     pub instructions: Vec<Instruction>,
@@ -40,6 +44,7 @@ impl<'src, 'ast, 'pass> Context<'src, 'ast, 'pass> {
             variable_to_object,
         }
     }
+    /// Helper to construct Context::Goal
     pub fn goal(
         instruction_capacity: usize,
         problem: &'ast Problem<'src>,
@@ -57,13 +62,13 @@ impl<'src, 'ast, 'pass> Context<'src, 'ast, 'pass> {
     }
 }
 
+/// Final pass over the Abstract Syntax Tree - will generate the final CompiledProblem.
 pub fn final_pass<'src>(
     mut domain_data: DomainData<'src>,
     domain: &Domain<'src>,
     problem: &Problem<'src>,
 ) -> Result<CompiledProblem, Error> {
     let (actions, action_inertia) = create_concrete_actions(&mut domain_data, domain, problem)?;
-
     let mut action_graph = ActionGraph::new();
     action_graph.set_size(actions.len());
     action_graph.apply_inertia(&action_inertia);
@@ -141,10 +146,6 @@ fn visit_basic_action<'src>(
     domain_data: &DomainData<'src>,
     action: &BasicAction<'src>,
     context: &mut Context<'src, '_, '_>,
-    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    // domain_action_idx: usize,
-    // compiled_action_count: usize,
-    // state_inertia: &mut Vec<Inertia>,
 ) -> Result<Option<CompiledAction>, Error> {
     let (args, domain_action_idx) = match context.kind {
         ContextKind::Action(domain_action_idx) => {
@@ -198,7 +199,6 @@ fn visit_basic_action<'src>(
         args,
         precondition,
         effect: effect_context.instructions,
-        // try_next: Vec::with_capacity(domain_data.action_graph.priority.len() * 10),
     }))
 }
 
@@ -224,11 +224,6 @@ fn visit_term_atomic_formula<'src>(
     domain_data: &DomainData<'src>,
     af: &AtomicFormula<'src, Term<'src>>,
     context: &mut Context,
-    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    // compiled_action_count: usize,
-    // instructions: &mut Vec<Instruction>,
-    // state_inertia: &mut Vec<Inertia>,
-    // is_effect: bool,
 ) -> Result<bool, Error> {
     let call_vec = if context.kind == ContextKind::Goal {
         // Goal formulas use objects already anyway
@@ -355,10 +350,6 @@ fn visit_precondition<'src>(
     domain_data: &DomainData<'src>,
     precondition: &PreconditionExpr<'src>,
     context: &mut Context,
-    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    // compiled_action_count: usize,
-    // instructions: &mut Vec<Instruction>,
-    // state_inertia: &mut Vec<Inertia>,
 ) -> Result<bool, Error> {
     match precondition {
         PreconditionExpr::And(vec) => {
@@ -386,11 +377,6 @@ fn visit_term_negative_formula<'src>(
     domain_data: &DomainData<'src>,
     formula: &NegativeFormula<'src, Term<'src>>,
     context: &mut Context,
-    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    // compiled_action_count: usize,
-    // instructions: &mut Vec<Instruction>,
-    // state_inertia: &mut Vec<Inertia>,
-    // is_effect: bool,
 ) -> Result<bool, Error> {
     match formula {
         NegativeFormula::Direct(af) => visit_term_atomic_formula(domain_data, af, context),
@@ -488,10 +474,6 @@ fn visit_effect<'src>(
     domain_data: &DomainData<'src>,
     effect: &Effect<'src>,
     context: &mut Context,
-    // args: Option<&[(&Name<'src>, &Name<'src>)]>,
-    // compiled_action_count: usize,
-    // instructions: &mut Vec<Instruction>,
-    // state_inertia: &mut Vec<Inertia>,
 ) -> Result<bool, Error> {
     match effect {
         Effect::And(vec) => {
