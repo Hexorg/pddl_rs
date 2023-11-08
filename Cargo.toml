@@ -1,6 +1,6 @@
 [package]
 name = "pddl_rs"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "PDDL parser"
 license = "MIT"
@@ -9,7 +9,12 @@ repository = "https://github.com/Hexorg/pddl_rs/"
 [lib]
 name = "pddl_rs"
 
+[profile.release]
+debug = true
+
 [dependencies]
 enumset = "1.0.12"
 ariadne = "0.3.0"
 nom = "7.1.3"
+lazy_static = "1.4.0"
+rand = "0.8.5"

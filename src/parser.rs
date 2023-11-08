@@ -18,70 +18,23 @@ use nom::{
     combinator::{cut, map, opt, recognize, value},
     multi::{fold_many1, many0},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    InputLength, InputTakeAtPosition, Parser,
+    InputTakeAtPosition, Parser,
 };
 
-type IResult<'src, O> = nom::IResult<Input<'src>, O, Error<'src>>;
+type IResult<'src, O> = nom::IResult<Input<'src>, O, Error>;
 
-fn err_name<'src>(
-    ek: ErrorKind<'src>,
-) -> impl FnMut(nom::Err<Error<'src>>) -> nom::Err<Error<'src>> {
+#[inline]
+fn err_name<'src>(ek: ErrorKind) -> impl FnMut(nom::Err<Error>) -> nom::Err<Error> {
     move |e| {
         e.map(|mut old_e| {
-            let input = old_e.input.unwrap();
-            use ErrorKind::*;
-            let len = match ek {
-                Nom(_)
-                | UnsetRequirement(_)
-                | Name
-                | Variable
-                | Term
-                | StructureDef
-                | TypedList
-                | Type
-                | FunctionType
-                | GD
-                | FunctionTerm
-                | Literal
-                | AtomicFormula
-                | PreconditionExpression
-                | FluentExpression
-                | FunctionTypedList
-                | Effect
-                | Tag(_) => input
-                    .char_indices()
-                    .find(|(_, c)| c.is_ascii_whitespace())
-                    .and_then(|(p, _)| Some(p))
-                    .unwrap_or(0),
-                Many1(_) | UnclosedParenthesis(_) | Parenthesis => 1,
-                // Compiler errors:
-                MissmatchedDomain(_) | ExpectedVariable | ExpectedName | UndeclaredVariable
-                | UndefinedType => panic!(),
-            };
-            if let ErrorKind::Nom(_) = old_e.kind {
-                let new_range = old_e.range.start..(old_e.range.start + len);
-                old_e.kind = ek;
-                old_e.range = new_range;
-                old_e
-            } else if old_e.kind != ek {
-                let mut old_range = old_e.range.clone();
-                match old_e.kind {
-                    UnclosedParenthesis(pos) => old_range.start = pos,
-                    _ => (),
-                }
-                Error {
-                    chain: Some(Box::new(old_e)),
-                    input: Some(input),
-                    kind: ek,
-                    range: old_range,
-                }
-            } else {
-                old_e
-            }
+            // use ErrorKind::*;
+            old_e.kind = ek;
+            old_e
         })
     }
 }
 
+#[inline]
 fn check_requirements<'src, O, F>(
     mut parser: F,
     required: EnumSet<Requirement>,
@@ -89,7 +42,7 @@ fn check_requirements<'src, O, F>(
 ) -> impl FnMut(Input<'src>) -> IResult<O>
 where
     O: 'src,
-    F: Parser<Input<'src>, O, Error<'src>>,
+    F: Parser<Input<'src>, O, Error>,
 {
     move |input: Input<'src>| {
         let (i, o) = parser.parse(input.clone())?;
@@ -97,10 +50,10 @@ where
             || (!or.is_empty() && i.requirements.is_superset(or)))
         {
             Err(nom::Err::Failure(Error {
-                input: Some(input.src),
+                // input: Some(input.src),
                 kind: ErrorKind::UnsetRequirement(required),
                 chain: None,
-                range: input.input_pos..i.input_pos,
+                span: input.span_end(i.input_pos),
             }))
         } else {
             Ok((i, o))
@@ -108,6 +61,7 @@ where
     }
 }
 
+#[inline]
 fn alt_check_requirements<'src, O, F>(
     mut parser: F,
     required: EnumSet<Requirement>,
@@ -115,23 +69,23 @@ fn alt_check_requirements<'src, O, F>(
 ) -> impl FnMut(Input<'src>) -> IResult<O>
 where
     O: 'src,
-    F: Parser<Input<'src>, O, Error<'src>>,
+    F: Parser<Input<'src>, O, Error>,
 {
     move |input: Input<'src>| {
         if !(input.requirements.is_superset(required)
             || (!or.is_empty() && input.requirements.is_superset(or)))
         {
-            let range = match parser.parse(input.clone()) {
-                Ok((i, _)) => input.input_pos..i.input_pos,
-                Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => e.range.clone(),
-                _ => input.input_pos..(input.input_pos + input.input_len()),
+            let span = match parser.parse(input.clone()) {
+                Ok((i, _)) => input.span_end(i.input_pos),
+                Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => e.span,
+                _ => input.into(),
             };
             Err(err_name(ErrorKind::UnsetRequirement(required))(
                 nom::Err::Error(Error {
-                    input: Some(input.src),
+                    // input: Some(input.src),
                     kind: ErrorKind::UnsetRequirement(required),
                     chain: None,
-                    range,
+                    span,
                 }),
             ))
         } else {
@@ -140,6 +94,7 @@ where
     }
 }
 
+#[inline]
 fn ignore<'src>(input: Input<'src>) -> IResult<()> {
     value(
         (),
@@ -149,7 +104,8 @@ fn ignore<'src>(input: Input<'src>) -> IResult<()> {
     )(input)
 }
 
-fn tag<'src>(tag_name: &'src str) -> impl Parser<Input<'src>, (), Error<'src>> {
+#[inline]
+fn tag<'src>(tag_name: &'static str) -> impl Parser<Input<'src>, (), Error> {
     value(
         (),
         terminated(
@@ -161,6 +117,7 @@ fn tag<'src>(tag_name: &'src str) -> impl Parser<Input<'src>, (), Error<'src>> {
     )
 }
 
+#[inline]
 fn many1<'src, O, G>(
     mut parser: G,
     name: &'static str,
@@ -176,41 +133,42 @@ where
     }
 }
 
+#[inline]
 fn minus_separated(input: Input) -> IResult<Spanned<char>> {
     delimited(multispace0, char('-'), multispace0)(input)
 }
 
+#[inline]
 fn preceded_span_included<'src, O1, O2, F, G>(
     mut first: F,
     mut second: G,
 ) -> impl FnMut(Input<'src>) -> IResult<O2>
 where
-    O1: SpannedAst + 'src,
-    O2: SpannedAstMut + 'src,
-    F: Parser<Input<'src>, O1, Error<'src>>,
-    G: Parser<Input<'src>, O2, Error<'src>>,
+    O1: SpannedAst<'src> + 'src,
+    O2: SpannedAstMut<'src> + 'src,
+    F: Parser<Input<'src>, O1, Error>,
+    G: Parser<Input<'src>, O2, Error>,
 {
     move |input: Input<'src>| {
         let origin = input.input_pos;
         let (input, _) = first.parse(input)?;
         let (input, mut o2) = second.parse(input)?;
-        o2.range_mut().start = origin;
+        o2.span_mut().start = origin;
         Ok((input, o2))
     }
 }
 
+#[inline]
 fn char(c: char) -> impl Fn(Input) -> IResult<Spanned<char>> {
-    move |i| {
-        nom::character::complete::char(c)(i).map(|(i, o)| {
-            let end = i.input_pos;
-            (i, (end - 1..end, o))
-        })
+    move |input| {
+        nom::character::complete::char(c)(input).map(|(i, o)| (i, (input.span_end(i.input_pos), o)))
     }
 }
 
+#[inline]
 fn parens<'src, O2, G>(mut parser: G) -> impl FnMut(Input<'src>) -> IResult<O2>
 where
-    G: Parser<Input<'src>, O2, Error<'src>>,
+    G: Parser<Input<'src>, O2, Error>,
 {
     move |input| {
         let open_paren_pos = input.input_pos;
@@ -223,9 +181,10 @@ where
     }
 }
 
+#[inline]
 fn parens_alt<'src, O2, G>(mut parser: G) -> impl FnMut(Input<'src>) -> IResult<O2>
 where
-    G: Parser<Input<'src>, O2, Error<'src>>,
+    G: Parser<Input<'src>, O2, Error>,
 {
     move |input| {
         let open_paren_pos = input.input_pos;
@@ -238,6 +197,7 @@ where
     }
 }
 
+#[inline]
 fn pddl_anyletter(input: Input) -> IResult<Input> {
     input.split_at_position_complete(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
 }
@@ -252,10 +212,10 @@ fn pddl_anyletter(input: Input) -> IResult<Input> {
 /// [spec](http://pddl4j.imag.fr/repository/wiki/BNF-PDDL-3.1.pdf)
 /// ```
 
-/// use pddl_rs::parser::{parse_domain, ast::Domain};
+/// use pddl_rs::parser::{parse_domain, ast::{Name, Domain}};
 /// let domain = parse_domain("(define (domain test))");
 /// assert_eq!(domain, Ok(
-///     Domain{name:(16..20, "test"),
+///     Domain{name:Name::new(16..20, "test"),
 ///     requirements:enumset::EnumSet::EMPTY,
 ///     types:vec![],
 ///     constants:vec![],
@@ -264,9 +224,11 @@ fn pddl_anyletter(input: Input) -> IResult<Input> {
 ///     constraints:None,
 ///     actions:vec![]}))
 /// ```
-pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Error<'src>> {
+pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Error> {
     let input = Input {
+        // filename,
         src,
+        is_problem: false,
         input_pos: 0,
         requirements: EnumSet::EMPTY,
     };
@@ -310,6 +272,7 @@ pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Error<'src>> {
     }
 }
 
+#[inline]
 fn require_def(input: Input) -> IResult<EnumSet<Requirement>> {
     parens(preceded(
         tag(":requirements"),
@@ -325,6 +288,7 @@ fn require_def(input: Input) -> IResult<EnumSet<Requirement>> {
     })
 }
 
+#[inline]
 fn require_key(input: Input) -> IResult<Requirement> {
     alt((
         map(tag(":strips"), |_| Strips),
@@ -352,6 +316,7 @@ fn require_key(input: Input) -> IResult<Requirement> {
     ))(input)
 }
 
+#[inline]
 fn types_def(input: Input) -> IResult<Vec<List>> {
     parens(preceded(
         check_requirements(tag(":types"), enum_set!(Typing), enum_set!()),
@@ -359,10 +324,12 @@ fn types_def(input: Input) -> IResult<Vec<List>> {
     ))(input)
 }
 
+#[inline]
 fn constants_def(input: Input) -> IResult<Vec<List>> {
     parens(preceded(tag(":constants"), cut(typed_list(name))))(input)
 }
 
+#[inline]
 fn predicates_def(input: Input) -> IResult<Vec<AtomicFSkeleton>> {
     parens(preceded(
         tag(":predicates"),
@@ -372,10 +339,12 @@ fn predicates_def(input: Input) -> IResult<Vec<AtomicFSkeleton>> {
 
 use name as predicate;
 
+#[inline]
 fn variable(input: Input) -> IResult<Name> {
     preceded_span_included(char('?'), name)(input).map_err(err_name(ErrorKind::Variable))
 }
 
+#[inline]
 fn atomic_function_skeleton(input: Input) -> IResult<AtomicFSkeleton> {
     parens(map(
         pair(function_symbol, typed_list(variable)),
@@ -385,6 +354,7 @@ fn atomic_function_skeleton(input: Input) -> IResult<AtomicFSkeleton> {
 
 use name as function_symbol;
 
+#[inline]
 fn functions_def(input: Input) -> IResult<Vec<FunctionTypedList>> {
     parens(preceded(
         check_requirements(
@@ -396,6 +366,7 @@ fn functions_def(input: Input) -> IResult<Vec<FunctionTypedList>> {
     ))(input)
 }
 
+#[inline]
 fn function_typed_list(input: Input) -> IResult<FunctionTypedList> {
     alt((
         map(
@@ -421,16 +392,12 @@ fn function_typed_list(input: Input) -> IResult<FunctionTypedList> {
     .map_err(err_name(ErrorKind::FunctionTypedList))
 }
 
+#[inline]
 fn function_type(input: Input) -> IResult<FunctionType> {
     alt((
         map(
             alt_check_requirements(digit0, enum_set!(NumericFluents), enum_set!()),
-            |o: Input| {
-                FunctionType::Numeric((
-                    o.input_pos..(o.input_pos + o.input_len()),
-                    i64::from_str_radix(o.src, 10).unwrap(),
-                ))
-            },
+            |o: Input| FunctionType::Numeric((o.into(), i64::from_str_radix(o.src, 10).unwrap())),
         ),
         map(
             check_requirements(
@@ -444,6 +411,7 @@ fn function_type(input: Input) -> IResult<FunctionType> {
     .map_err(err_name(ErrorKind::FunctionType))
 }
 
+#[inline]
 fn constraints(input: Input) -> IResult<ConstraintGD> {
     parens(preceded(
         check_requirements(tag(":constraints"), enum_set!(Constraints), enum_set!()),
@@ -451,6 +419,7 @@ fn constraints(input: Input) -> IResult<ConstraintGD> {
     ))(input)
 }
 
+#[inline]
 fn structure_def(input: Input) -> IResult<Action> {
     alt((
         map(action_def, |a| Action::Basic(a)),
@@ -460,6 +429,7 @@ fn structure_def(input: Input) -> IResult<Action> {
     .map_err(err_name(ErrorKind::StructureDef))
 }
 
+#[inline]
 fn typed_list<'src, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<Vec<List<'src>>>
 where
     G: FnMut(Input<'src>) -> IResult<Name<'src>> + Copy,
@@ -497,6 +467,7 @@ where
 
 use name as primitive_type;
 
+#[inline]
 fn r#type(input: Input) -> IResult<Type> {
     alt((
         map(primitive_type, |o| Type::Exact(o)),
@@ -511,6 +482,7 @@ fn r#type(input: Input) -> IResult<Type> {
     .map_err(err_name(ErrorKind::Type))
 }
 
+#[inline]
 fn empty_or<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<Option<O2>>
 where
     O2: 'src,
@@ -519,6 +491,7 @@ where
     alt((map(tag("()"), |_| None), map(parser, |p| Some(p))))
 }
 
+#[inline]
 fn action_def(input: Input) -> IResult<BasicAction> {
     map(
         parens(tuple((
@@ -541,6 +514,7 @@ fn action_def(input: Input) -> IResult<BasicAction> {
     )(input)
 }
 
+#[inline]
 fn forall<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<Forall<O2>>
 where
     O2: 'src,
@@ -558,6 +532,7 @@ where
     ))
 }
 
+#[inline]
 fn exists<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<Exists<O2>>
 where
     O2: 'src,
@@ -575,6 +550,7 @@ where
     ))
 }
 
+#[inline]
 fn preference<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<Preference<O2>>
 where
     O2: 'src,
@@ -589,6 +565,7 @@ where
     ))
 }
 
+#[inline]
 fn pre_gd(input: Input) -> IResult<PreconditionExpr> {
     alt((
         map(parens(preceded(tag("and"), cut(many0(pre_gd)))), |vec| {
@@ -603,6 +580,7 @@ fn pre_gd(input: Input) -> IResult<PreconditionExpr> {
 
 use name as pref_name;
 
+#[inline]
 fn gd(input: Input) -> IResult<GD> {
     alt((
         map(atomic_formula(term), |af| GD::AtomicFormula(af)),
@@ -623,6 +601,7 @@ fn gd(input: Input) -> IResult<GD> {
 }
 use name as action_symbol;
 
+#[inline]
 fn literal<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<NegativeFormula<O2>>
 where
     O2: 'src,
@@ -640,6 +619,7 @@ where
     }
 }
 
+#[inline]
 fn atomic_formula<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<AtomicFormula<O2>>
 where
     O2: 'src,
@@ -660,6 +640,7 @@ where
     }
 }
 
+#[inline]
 fn term(input: Input) -> IResult<Term> {
     alt((
         map(variable, |o| Term::Variable(o)),
@@ -673,6 +654,7 @@ fn term(input: Input) -> IResult<Term> {
     .map_err(err_name(ErrorKind::Term))
 }
 
+#[inline]
 fn function_term(input: Input) -> IResult<FunctionTerm> {
     check_requirements(
         parens_alt(map(pair(function_symbol, many0(term)), |(name, terms)| {
@@ -684,6 +666,7 @@ fn function_term(input: Input) -> IResult<FunctionTerm> {
     .map_err(err_name(ErrorKind::FunctionTerm))
 }
 
+#[inline]
 fn f_exp(input: Input) -> IResult<Spanned<FluentExpression>> {
     alt((
         map(digit0, |o: Input| {
@@ -700,7 +683,7 @@ fn f_exp(input: Input) -> IResult<Spanned<FluentExpression>> {
             parens(preceded(tag("-"), cut(pair(f_exp, f_exp)))),
             |args| {
                 (
-                    args.0 .0.start..args.1 .0.end,
+                    args.0 .0.change_end(args.1 .0.end),
                     FluentExpression::Subtract(Box::new(args)),
                 )
             },
@@ -709,24 +692,25 @@ fn f_exp(input: Input) -> IResult<Spanned<FluentExpression>> {
             parens(preceded(tag("/"), cut(pair(f_exp, f_exp)))),
             |args| {
                 (
-                    args.0 .0.start..args.1 .0.end,
+                    args.0 .0.change_end(args.1 .0.end),
                     FluentExpression::Divide(Box::new(args)),
                 )
             },
         ),
         map(
             parens(preceded(tag("+"), cut(many1(f_exp, "fluent expression")))),
-            |args| (args.range(), FluentExpression::Add(args)),
+            |args| (args.span(), FluentExpression::Add(args)),
         ),
         map(
             parens(preceded(tag("*"), cut(many1(f_exp, "fluent expression")))),
-            |args| (args.range(), FluentExpression::Multiply(args)),
+            |args| (args.span(), FluentExpression::Multiply(args)),
         ),
-        map(f_head, |f| (f.range(), FluentExpression::Function(f))),
+        map(f_head, |f| (f.span(), FluentExpression::Function(f))),
     ))(input)
     .map_err(err_name(ErrorKind::FluentExpression))
 }
 
+#[inline]
 fn f_head(input: Input) -> IResult<FunctionTerm> {
     alt((
         function_term,
@@ -737,16 +721,23 @@ fn f_head(input: Input) -> IResult<FunctionTerm> {
     ))(input)
 }
 
+#[inline]
 fn name(input: Input) -> IResult<Name> {
     terminated(
         map(recognize(pair(alpha1, pddl_anyletter)), |o| {
-            (o.input_pos..(o.input_pos + o.src.len()), o.src)
+            let span = Span {
+                start: input.input_pos,
+                end: input.input_pos + o.src.len(),
+                is_problem: input.is_problem,
+            };
+            Name(span, o.src)
         }),
         ignore,
     )(input)
     .map_err(err_name(ErrorKind::Name))
 }
 
+#[inline]
 fn effect(input: Input) -> IResult<Effect> {
     alt((
         map(parens(preceded(tag("and"), cut(many0(effect)))), |vec| {
@@ -795,6 +786,7 @@ fn effect(input: Input) -> IResult<Effect> {
     .map_err(err_name(ErrorKind::Effect))
 }
 
+#[inline]
 fn durative_action_def(input: Input) -> IResult<DurativeAction> {
     map(
         parens(tuple((
@@ -821,6 +813,7 @@ fn durative_action_def(input: Input) -> IResult<DurativeAction> {
 
 use name as da_symbol;
 
+#[inline]
 fn da_gd(input: Input) -> IResult<DurationGD> {
     alt((
         map(timed_gd, |tgd| DurationGD::GD(tgd)),
@@ -832,6 +825,7 @@ fn da_gd(input: Input) -> IResult<DurationGD> {
     ))(input)
 }
 
+#[inline]
 fn timed_gd(input: Input) -> IResult<TimedGD> {
     parens(alt((
         map(pair(tag("at start"), cut(gd)), |((), gd)| {
@@ -844,6 +838,7 @@ fn timed_gd(input: Input) -> IResult<TimedGD> {
     )))(input)
 }
 
+#[inline]
 fn duration_contraint(input: Input) -> IResult<DurationConstraint> {
     parens(alt((
         map(
@@ -869,6 +864,7 @@ fn duration_contraint(input: Input) -> IResult<DurationConstraint> {
     )))(input)
 }
 
+#[inline]
 fn da_effect(input: Input) -> IResult<DurationEffect> {
     parens(alt((
         map(pair(tag("and"), cut(many0(da_effect))), |((), vec)| {
@@ -888,6 +884,7 @@ fn da_effect(input: Input) -> IResult<DurationEffect> {
     )))(input)
 }
 
+#[inline]
 fn timed_effect(input: Input) -> IResult<TimedEffect> {
     alt((
         map(pair(tag("at start"), cut(effect)), |((), e)| {
@@ -903,23 +900,24 @@ fn timed_effect(input: Input) -> IResult<TimedEffect> {
 /// Parse problem source code from a &str. Clossely follows Daniel L Kovacs'
 /// [spec](http://pddl4j.imag.fr/repository/wiki/BNF-PDDL-3.1.pdf)
 /// ```
-/// use pddl_rs::parser::{parse_problem, ast::{Problem, PreconditionExpr, GD, AtomicFormula, Term}};
+/// use pddl_rs::parser::{parse_problem, ast::{Name, Problem, PreconditionExpr, GD, AtomicFormula, Term}};
 /// let problem = parse_problem("(define (problem test) (:domain td) (:goal (end)))", enumset::EnumSet::EMPTY);
 /// assert_eq!(problem, Ok(
-///     Problem{name:(17..21, "test"),
-///     domain:(32..34, "td"),
+///     Problem{name:Name::new(17..21, "test"),
+///     domain:Name::new(32..34, "td"),
 ///     requirements:enumset::EnumSet::EMPTY,
 ///     objects:vec![],
 ///     init:vec![],
-///     goal:PreconditionExpr::GD(GD::AtomicFormula(AtomicFormula::Predicate((44..47, "end"), vec![]))),
+///     goal:PreconditionExpr::GD(GD::AtomicFormula(AtomicFormula::Predicate(Name::new(44..47, "end"), vec![]))),
 ///     constraints:None,
 ///     metric:None}))
 /// ```
 pub fn parse_problem<'src>(
     src: &'src str,
     requirements: EnumSet<Requirement>,
-) -> Result<Problem<'src>, Error<'src>> {
+) -> Result<Problem<'src>, Error> {
     let input = Input {
+        is_problem: true,
         src,
         input_pos: 0,
         requirements,
@@ -971,6 +969,7 @@ pub fn parse_problem<'src>(
     }
 }
 
+#[inline]
 fn init_el(input: Input) -> IResult<Init> {
     alt((
         map(literal(name), |l| Init::AtomicFormula(l)),
@@ -993,6 +992,7 @@ fn init_el(input: Input) -> IResult<Init> {
     ))(input)
 }
 
+#[inline]
 fn pref_con_gd(input: Input) -> IResult<PrefConstraintGD> {
     alt((
         map(
@@ -1009,6 +1009,7 @@ fn pref_con_gd(input: Input) -> IResult<PrefConstraintGD> {
     ))(input)
 }
 
+#[inline]
 fn con_gd(input: Input) -> IResult<ConstraintGD> {
     alt((
         map(parens(preceded(tag("and"), cut(many0(con_gd)))), |f| {
@@ -1070,6 +1071,7 @@ fn con_gd(input: Input) -> IResult<ConstraintGD> {
     ))(input)
 }
 
+#[inline]
 fn metric_spec(input: Input) -> IResult<Metric> {
     alt((
         map(pair(tag("minimize"), cut(metric_f_exp)), |((), mfe)| {
@@ -1081,6 +1083,7 @@ fn metric_spec(input: Input) -> IResult<Metric> {
     ))(input)
 }
 
+#[inline]
 fn metric_f_exp(input: Input) -> IResult<MetricFluentExpr> {
     alt((
         map(tag("total-time"), |_| MetricFluentExpr::TotalTime()),
@@ -1093,179 +1096,218 @@ fn metric_f_exp(input: Input) -> IResult<MetricFluentExpr> {
 
 #[cfg(test)]
 mod tests {
+    use super::ast::Span;
     use super::*;
 
     #[test]
     fn test_basic() {
         assert_eq!(
-            pddl_anyletter(Input::new("H_ i")),
+            pddl_anyletter(Input::new(false, "H_ i")),
             Ok((
                 Input {
+                    // filename: None,
                     src: " i",
+                    is_problem: false,
                     input_pos: 2,
                     requirements: EnumSet::EMPTY
                 },
-                Input::new("H_")
+                Input::new(false, "H_")
             ))
         );
         assert_eq!(
-            name(Input::new("He-l_lo world")),
+            name(Input::new(true, "He-l_lo world")),
             Ok((
                 Input {
+                    // filename: None,
                     src: "world",
+                    is_problem: true,
                     input_pos: 8,
                     requirements: EnumSet::EMPTY
                 },
-                (0..7, "He-l_lo")
+                Name::new(0..7, "He-l_lo")
             ))
         );
         assert_eq!(
-            name(Input::new("#$Hello")),
+            name(Input::new(false, "He-l_lo world")).unwrap().1 .0,
+            (0..7).into()
+        );
+        let mut span: Span = (0..0).into();
+        span.is_problem = true;
+        assert_eq!(
+            name(Input::new(true, "#$Hello")),
             Err(nom::Err::Error(Error {
-                input: Some("#$Hello"),
+                // input: Some("#$Hello"),
                 kind: ErrorKind::Name,
                 chain: None,
-                range: 0..0
+                span
             }))
         );
         assert_eq!(
-            variable(Input::new("?test me")),
+            variable(Input::new(false, "?test me")),
             Ok((
                 Input {
+                    // filename: None,
+                    is_problem: false,
                     src: "me",
                     input_pos: 6,
                     requirements: EnumSet::EMPTY
                 },
-                (0..5, "test")
+                Name::new(0..5, "test")
             ))
         );
         assert_eq!(
-            parens(name)(Input::new("(test;comment\n)")),
+            parens(name)(Input::new(false, "(test;comment\n)")),
             Ok((
                 Input {
+                    // filename: None,
+                    is_problem: false,
                     src: "",
                     input_pos: 15,
                     requirements: EnumSet::EMPTY
                 },
-                (1..5, "test")
+                Name::new(1..5, "test")
             ))
         );
 
         assert_eq!(
-            pair(name, variable)(Input::new("hello ?world")),
+            pair(name, variable)(Input::new(false, "hello ?world")),
             Ok((
                 Input {
+                    // filename: None,
+                    is_problem: false,
                     src: "",
                     input_pos: 12,
                     requirements: EnumSet::EMPTY
                 },
-                ((0..5, "hello"), (6..12, "world"))
+                (Name::new(0..5, "hello"), Name::new(6..12, "world"))
             ))
         );
 
         assert_eq!(
             term(Input {
+                // filename: None,
+                is_problem: true,
                 src: "(test ?one)  ",
                 input_pos: 0,
                 requirements: enum_set!(ObjectFluents)
             }),
             Ok((
                 Input {
+                    is_problem: true,
+                    // filename: None,
                     src: "",
                     input_pos: 13,
                     requirements: enum_set!(ObjectFluents)
                 },
                 Term::Function(FunctionTerm {
-                    name: (1..5, "test"),
-                    terms: vec![Term::Variable((6..10, "one"))]
+                    name: Name::new(1..5, "test"),
+                    terms: vec![Term::Variable(Name::new(6..10, "one"))]
                 })
             ))
         );
+        assert_eq!(
+            term(Input {
+                is_problem: false,
+                src: "(test ?one)  ",
+                input_pos: 0,
+                requirements: enum_set!(ObjectFluents)
+            })
+            .unwrap()
+            .1
+            .span(),
+            (1..10).into()
+        );
+        let mut span: Span = (0..13).into();
+        span.is_problem = true;
         let test = Error {
-            input: Some("(test ?one)  "),
             kind: ErrorKind::Term,
             chain: Some(Box::new(Error {
-                input: Some("(test ?one)  "),
                 kind: ErrorKind::UnsetRequirement(enum_set!(ObjectFluents)),
                 chain: None,
-                range: 0..13,
+                span,
             })),
-            range: 0..5,
+            span,
         };
         // test.clone().report("stdio").eprint(("stdio", ariadne::Source::from("(test ?one)  ")));
         assert_eq!(
-            term(Input::new("(test ?one)  ")),
+            term(Input::new(true, "(test ?one)  ")),
             Err(nom::Err::Error(test))
         );
         assert_eq!(
-            term(Input::new("?hello")),
+            term(Input::new(false, "?hello")),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 6,
                     requirements: EnumSet::EMPTY
                 },
-                Term::Variable((0..6, "hello"))
+                Term::Variable(Name::new(0..6, "hello"))
             ))
         );
         assert_eq!(
             typed_list(name)(Input {
+                is_problem: false,
                 src: "one two - object",
                 input_pos: 0,
                 requirements: enum_set!(Typing)
             }),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 16,
                     requirements: enum_set!(Typing)
                 },
                 vec![List {
-                    items: vec![(0..3, "one"), (4..7, "two")],
-                    kind: Type::Exact((10..16, "object"))
+                    items: vec![Name::new(0..3, "one"), Name::new(4..7, "two")],
+                    kind: Type::Exact(Name::new(10..16, "object"))
                 }]
             ))
         );
         assert_eq!(
-            typed_list(name)(Input::new("one two")),
+            typed_list(name)(Input::new(false, "one two")),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 7,
                     requirements: EnumSet::EMPTY
                 },
                 vec![List {
-                    items: vec![(0..3, "one"), (4..7, "two")],
+                    items: vec![Name::new(0..3, "one"), Name::new(4..7, "two")],
                     kind: Type::None
                 }]
             ))
         );
         assert_eq!(
-            typed_list(variable)(Input::new("?a1")),
+            typed_list(variable)(Input::new(false, "?a1")),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 3,
                     requirements: EnumSet::EMPTY
                 },
                 vec![List {
-                    items: vec![(0..3, "a1")],
+                    items: vec![Name::new(0..3, "a1")],
                     kind: Type::None
                 }]
             ))
         );
         assert_eq!(
-            atomic_function_skeleton(Input::new("(testing ?left ?right)")),
+            atomic_function_skeleton(Input::new(false, "(testing ?left ?right)")),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 22,
                     requirements: EnumSet::EMPTY
                 },
                 AtomicFSkeleton {
-                    name: (1..8, "testing"),
+                    name: Name::new(1..8, "testing"),
                     variables: vec![List {
-                        items: vec![(9..14, "left"), (15..21, "right")],
+                        items: vec![Name::new(9..14, "left"), Name::new(15..21, "right")],
                         kind: Type::None
                     }]
                 }
@@ -1276,15 +1318,16 @@ mod tests {
     #[test]
     fn test_typed_list() {
         assert_eq!(
-            typed_list(variable)(Input::new("?one ?two")),
+            typed_list(variable)(Input::new(false, "?one ?two")),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 9,
                     requirements: EnumSet::EMPTY
                 },
                 vec![List {
-                    items: vec![(0..4, "one"), (5..9, "two")],
+                    items: vec![Name::new(0..4, "one"), Name::new(5..9, "two")],
                     kind: Type::None
                 }]
             ))
@@ -1294,14 +1337,18 @@ mod tests {
     #[test]
     fn test_atomic_formula() {
         assert_eq!(
-            atomic_formula(term)(Input::new("(ball ?obj)")),
+            atomic_formula(term)(Input::new(false, "(ball ?obj)")),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 11,
                     requirements: EnumSet::EMPTY
                 },
-                AtomicFormula::Predicate((1..5, "ball"), vec![Term::Variable((6..10, "obj"))])
+                AtomicFormula::Predicate(
+                    Name::new(1..5, "ball"),
+                    vec![Term::Variable(Name::new(6..10, "obj"))]
+                )
             ))
         )
     }
@@ -1309,16 +1356,17 @@ mod tests {
     #[test]
     fn test_gd() {
         assert_eq!(
-            gd(Input::new("(and (ball ?obj))")),
+            gd(Input::new(false, "(and (ball ?obj))")),
             Ok((
                 Input {
+                    is_problem: false,
                     src: "",
                     input_pos: 17,
                     requirements: EnumSet::EMPTY
                 },
                 GD::And(vec![GD::AtomicFormula(AtomicFormula::Predicate(
-                    (6..10, "ball"),
-                    vec![Term::Variable((11..15, "obj"))]
+                    Name::new(6..10, "ball"),
+                    vec![Term::Variable(Name::new(11..15, "obj"))]
                 ))])
             ))
         )
@@ -1326,6 +1374,10 @@ mod tests {
 
     #[test]
     fn test_effect() {
-        assert!(empty_or(effect)(Input::new("(and (at-robby ?to) (not (at-robby ?from)))")).is_ok())
+        assert!(empty_or(effect)(Input::new(
+            false,
+            "(and (at-robby ?to) (not (at-robby ?from)))"
+        ))
+        .is_ok())
     }
 }
