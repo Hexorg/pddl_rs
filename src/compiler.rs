@@ -1,8 +1,9 @@
 use std::{collections::HashMap, slice::Iter};
 
 mod domain_data;
-use domain_data::{preprocess, DomainData};
+use domain_data::DomainData;
 mod first_pass;
+use first_pass::first_pass;
 mod final_pass;
 use enumset::{EnumSet, EnumSetType};
 use final_pass::final_pass;
@@ -16,27 +17,32 @@ use crate::{Error, ErrorKind};
 
 use self::action_graph::ActionGraph;
 
+pub type PredicateUsize = u16;
+pub type ASTActionUsize = u16;
+pub type CompiledActionUsize = u32;
+pub type StateUsize = u16;
+pub type IntValue = i64;
 
 /// Primitive bytecode needed to check action preconditions and apply effects to a "state"(memory).
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Instruction {
-    ReadState(usize),
-    SetState(usize),
-    ReadFunction(usize),
-    SetFunction(usize),
-    And(usize),
+    ReadState(StateUsize),
+    SetState(StateUsize),
+    ReadFunction(StateUsize),
+    SetFunction(StateUsize),
+    And(PredicateUsize),
     Not,
     Or,
     Add,
     Sub,
     /// Push immediate
-    Push(i64),
+    Push(IntValue),
 }
 
 /// [`Instruction`] interpreter has stack of this type to help safety of different storage types.
 enum Value {
     Bool(bool),
-    Int(i64),
+    Int(IntValue),
 }
 
 impl Default for Value {
@@ -52,7 +58,7 @@ impl Value {
             _ => panic!("Expected bool stack item."),
         }
     }
-    pub fn unwrap_int(&self) -> i64 {
+    pub fn unwrap_int(&self) -> IntValue {
         match self {
             Self::Int(i) => *i,
             _ => panic!("Expected int stack item."),
@@ -62,16 +68,18 @@ impl Value {
 
 /// Helper trait to easier manage `Vec<Instruction>` fields of actions.
 pub trait Runnable {
-    fn run(self, state: &[bool], functions: &[i64]) -> bool;
-    fn run_mut(self, state: &mut [bool], functions: &mut [i64]);
+    fn run(self, state: &[bool], functions: &[IntValue]) -> bool;
+    fn run_mut(self, state: &mut [bool], functions: &mut [IntValue]);
+    fn state_miss_count(self, state: &[bool]) -> IntValue;
+    fn disasm(self) -> String;
 }
 
 impl Runnable for &[Instruction] {
-    fn run(self, state: &[bool], _: &[i64]) -> bool {
+    fn run(self, state: &[bool], _: &[IntValue]) -> bool {
         let mut stack = Vec::<Value>::with_capacity(512);
         for instruction in self {
             match instruction {
-                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr])),
+                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr as usize])),
                 Instruction::SetState(_) => panic!("Instructions try to chane immutable state."),
                 Instruction::ReadFunction(_) => todo!(),
                 Instruction::SetFunction(_) => todo!(),
@@ -85,8 +93,11 @@ impl Runnable for &[Instruction] {
                     stack.push(Value::Bool(result));
                 }
                 Instruction::Not => {
-                    let s = !stack.pop().unwrap().unwrap_bool();
-                    stack.push(Value::Bool(s));
+                    if let Some(v) = stack.pop() {
+                        stack.push(Value::Bool(!v.unwrap_bool()));
+                    } else {
+                        stack.push(Value::Bool(false))
+                    }
                 }
                 Instruction::Or => todo!(),
                 Instruction::Add => todo!(),
@@ -101,11 +112,19 @@ impl Runnable for &[Instruction] {
         let mut stack = Vec::<Value>::with_capacity(512);
         for instruction in self {
             match instruction {
-                Instruction::SetState(addr) => state[*addr] = stack.pop().unwrap().unwrap_bool(),
-                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr])),
-                Instruction::ReadFunction(addr) => stack.push(Value::Int(functions[*addr])), // todo
+                Instruction::SetState(addr) => {
+                    if let Some(v) = stack.pop() {
+                        state[*addr as usize] = v.unwrap_bool()
+                    } else {
+                        state[*addr as usize] = true
+                    }
+                }
+                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr as usize])),
+                Instruction::ReadFunction(addr) => {
+                    stack.push(Value::Int(functions[*addr as usize]))
+                } // todo
                 Instruction::SetFunction(addr) => {
-                    functions[*addr] = stack.pop().unwrap().unwrap_int();
+                    functions[*addr as usize] = stack.pop().unwrap().unwrap_int();
                 } // todo
                 Instruction::And(count) => {
                     let mut result = true;
@@ -117,8 +136,11 @@ impl Runnable for &[Instruction] {
                     stack.push(Value::Bool(result));
                 }
                 Instruction::Not => {
-                    let s = !stack.pop().unwrap().unwrap_bool();
-                    stack.push(Value::Bool(s));
+                    if let Some(v) = stack.pop() {
+                        stack.push(Value::Bool(!v.unwrap_bool()));
+                    } else {
+                        stack.push(Value::Bool(false))
+                    }
                 }
                 Instruction::Or => todo!(),
                 Instruction::Add => {
@@ -130,50 +152,115 @@ impl Runnable for &[Instruction] {
             }
         }
     }
+
+    fn state_miss_count(self, state: &[bool]) -> i64 {
+        let mut stack = Vec::<Value>::with_capacity(512);
+        let mut state_miss_count = 0;
+        for instruction in self {
+            match instruction {
+                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr as usize])),
+                Instruction::SetState(_) => todo!(),
+                Instruction::ReadFunction(_) => todo!(),
+                Instruction::SetFunction(_) => todo!(),
+                Instruction::And(count) => {
+                    let mut result = true;
+                    let mut count = *count;
+                    while count > 0 {
+                        let sv = stack.pop().unwrap().unwrap_bool();
+                        if !sv {
+                            state_miss_count += 1
+                        }
+                        result &= sv;
+                        count -= 1;
+                    }
+                    stack.push(Value::Bool(result));
+                }
+                Instruction::Not => {
+                    let s = !stack.pop().unwrap().unwrap_bool();
+                    stack.push(Value::Bool(s));
+                }
+                Instruction::Or => todo!(),
+                Instruction::Add => todo!(),
+                Instruction::Sub => todo!(),
+                Instruction::Push(_) => todo!(),
+            }
+        }
+        if state_miss_count == 0 && !stack.pop().unwrap_or_default().unwrap_bool() {
+            state_miss_count += 1;
+        }
+        state_miss_count
+    }
+
+    fn disasm(self) -> String {
+        let mut result = String::with_capacity(self.len() * 6);
+        for instruction in self {
+            if result.len() > 0 {
+                result.push_str(", ");
+            }
+            match instruction {
+                Instruction::ReadState(addr) => result.push_str(&format!("RS({})", *addr)),
+                Instruction::SetState(addr) => result.push_str(&format!("WS({})", *addr)),
+                Instruction::ReadFunction(addr) => result.push_str(&format!("RF({})", *addr)),
+                Instruction::SetFunction(addr) => result.push_str(&format!("WF({})", *addr)),
+                Instruction::And(count) => result.push_str(&format!("AND_{}", *count)),
+                Instruction::Not => result.push_str("NOT"),
+                Instruction::Or => result.push_str("OR"),
+                Instruction::Add => result.push_str("ADD"),
+                Instruction::Sub => result.push_str("SUB"),
+                Instruction::Push(value) => result.push_str(&format!("PUSH({})", *value)),
+            }
+        }
+        result
+    }
 }
 
 /// Flatenned problem ready for solving
 /// All instrutions use shared memory offsets
 /// no larger than `self.memory_size`
 #[derive(Debug, PartialEq)]
-pub struct CompiledProblem<'src> {
+pub struct CompiledProblem {
     /// How many bits needed to fully represent this problem's state
     /// (Actual memory used depends on type used to represent state.
     /// A Vec<bool> will use `memory_size` bytes.)
-    pub memory_size: usize,
+    pub memory_size: StateUsize,
+    /// Out of `memory_size` memory used, `constants_size` will never change during the search.
+    pub constants_size: StateUsize,
     /// All compiled actions for this problem. Each domain action compiles into
     /// multiple [`CompiledAction`]s due to object permutations for various predicates and types.
-    pub actions: Vec<CompiledAction<'src>>,
+    pub actions: Vec<CompiledAction>,
     /// Executable bytecode to set initial conditions
     pub init: Vec<Instruction>,
     /// Executable bytecode to check if the goal is met
     pub goal: Vec<Instruction>,
-
-    // Optimization structures:
-    /// Map of a callable action (name + args vector) to a ordered list of
-    /// suggested actions to try and preemtion points between them.
+    /// Priority list of compiled actions to try
     pub action_graph: ActionGraph,
 }
 
 /// Flatenned representation of Actions inside [`CompiledProblem`]s
 /// All instruction offsets point to shared memory
-#[derive(Debug, PartialEq, Clone)]
-pub struct CompiledAction<'src> {
+#[derive(Debug, PartialEq)]
+pub struct CompiledAction {
     /// Offset into [`Domain`].actions vector pointing to source of this action,
     /// in case you need to display a message pointing to that PDDL code location).
-    pub domain_action_idx: usize,
-    /// Exect object arguments bound to this action. PDDL actions use types to permutate themselves
-    /// over various objects. CompiledActions are bound to exact objcts.
-    pub args: Vec<Name<'src>>,
+    pub domain_action_idx: ASTActionUsize,
+    /// Exact object arguments bound to this action. PDDL actions use types to permutate themselves
+    /// over various objects. CompiledActions are bound to exact objcts. First u16 is the offset in
+    /// problem.objects list. Second u16 is the offset in that list's variables.
+    pub args: Vec<(PredicateUsize, PredicateUsize)>,
     /// Executable bytecode to check if action's preconditions are met.
     pub precondition: Vec<Instruction>,
     /// Executable bytecode to apply action effects.
     pub effect: Vec<Instruction>,
 }
 
-impl<'src> CompiledAction<'src> {
+impl CompiledAction {
     pub fn new() -> Self {
-        Self { domain_action_idx: 0, args: Vec::new(), precondition: Vec::new(), effect: Vec::new() }
+        Self {
+            domain_action_idx: 0,
+            args: Vec::new(),
+            precondition: Vec::new(),
+            effect: Vec::new(),
+        }
     }
 }
 
@@ -181,18 +268,14 @@ impl<'src> CompiledAction<'src> {
 /// to allow for automatic swithching of them on and off.
 #[derive(EnumSetType, Debug)]
 pub enum Optimization {
-    /// Following the Koehler, Jana, and Jörg Hoffmann. "On the Instantiation of ADL Operators Involving Arbitrary First-Order Formulas." PuK. 2000. [paper](https://www.researchgate.net/profile/Jana-Koehler-2/publication/220916196_On_the_Instantiation_of_ADL_Operators_Involving_Arbitrary_First-Order_Formulas/links/53f5c12c0cf2fceacc6f65e0/On-the-Instantiation-of-ADL-Operators-Involving-Arbitrary-First-Order-Formulas.pdf),
-    /// Inertia allows us to start pruning unused states, actions, and instatiate basic action-graphs allowing us to skip many dead-end states.
-    Inertia,
+    // /// Following the Koehler, Jana, and Jörg Hoffmann. "On the Instantiation of ADL Operators Involving Arbitrary First-Order Formulas." PuK. 2000. [paper](https://www.researchgate.net/profile/Jana-Koehler-2/publication/220916196_On_the_Instantiation_of_ADL_Operators_Involving_Arbitrary_First-Order_Formulas/links/53f5c12c0cf2fceacc6f65e0/On-the-Instantiation-of-ADL-Operators-Involving-Arbitrary-First-Order-Formulas.pdf),
+    // /// Inertia allows us to start pruning unused states, actions, and instatiate basic action-graphs allowing us to skip many dead-end states.
+    // Inertia,
 }
 
 impl Optimization {
-    pub fn none() -> EnumSet<Self> {
-        EnumSet::EMPTY
-    }
-    pub fn all() -> EnumSet<Self> {
-        EnumSet::ALL
-    }
+    pub const NONE: EnumSet<Self> = EnumSet::EMPTY;
+    pub const ALL: EnumSet<Self> = EnumSet::ALL;
 }
 
 /// Compile and optimize parsed [`Domain`] and [`Problem`] structures into a compiled problem ready for using in search methods.
@@ -200,10 +283,9 @@ impl Optimization {
 pub fn compile_problem<'src>(
     domain: &Domain<'src>,
     problem: &Problem<'src>,
-    optimizations: EnumSet<Optimization>
-) -> Result<CompiledProblem<'src>, Error<'src>> {
-    let preprocess_data = preprocess(domain, problem)?;
-    final_pass(preprocess_data, domain, problem, optimizations)
+) -> Result<CompiledProblem, Error> {
+    let data = first_pass(domain, problem)?;
+    final_pass(data, domain, problem)
 }
 
 /// Given a list of types, use a type to object map and generate all possible
@@ -213,22 +295,28 @@ pub fn compile_problem<'src>(
 /// * `type_to_objects` - a map of type names to vector of all world objects of that type.
 /// * `list` - the argument list that needs to be populated with world objects.
 /// * `f` - closure that gets all permutations of objects populated the `list` in a form of a slice
-///     mapping `list`'s items to world object names - `&[(ListItemName, ObjectName)]`
+///     mapping `list`'s items to world object indexes - `&[(ListItemName, (row, col))]`
 fn for_all_type_object_permutations<'src, F, O>(
-    type_to_objects: &HashMap<&'src str, Vec<Name<'src>>>,
+    type_to_objects: &HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
     list: &[List<'src>],
     mut f: F,
-) -> Result<Vec<O>, Error<'src>>
+) -> Result<Vec<O>, Error>
 where
-    F: FnMut(&[(&Name<'src>, &Name<'src>)]) -> Result<O, Error<'src>>,
+    F: FnMut(&[(&Name<'src>, &(PredicateUsize, PredicateUsize))]) -> Result<Option<O>, Error>,
 {
     use ErrorKind::UndefinedType;
 
-    fn _has_collition<'parent, 'src>(args: &[(&'parent Name<'src>, &'parent Name<'src>)], iterators: &[(&'src str, Iter<'parent, Name<'src>>)]) -> bool {
+    fn _has_collition<'parent, 'src>(
+        args: &[(
+            &'parent Name<'src>,
+            &'parent (PredicateUsize, PredicateUsize),
+        )],
+        iterators: &[(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
+    ) -> bool {
         for i in 0..iterators.len() {
             for j in 0..iterators.len() {
-                if args[i].1.1 == args[j].1.1 && i != j && iterators[i].0 == iterators[j].0 {
-                    return true
+                if args[i].1 .1 == args[j].1 .1 && i != j && iterators[i].0 == iterators[j].0 {
+                    return true;
                 }
             }
         }
@@ -248,14 +336,17 @@ where
     /// # Return:
     /// Returns false when it's impossible to iterate more, true when we can keep going.
     fn _args_iter<'parent, 'src>(
-        type_to_objects: &'parent HashMap<&'src str, Vec<Name<'src>>>,
-        iterators: &mut [(&'src str, Iter<'parent, Name<'src>>)],
-        args: &mut [(&'parent Name<'src>, &'parent Name<'src>)],
+        type_to_objects: &'parent HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
+        iterators: &mut [(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
+        args: &mut [(
+            &'parent Name<'src>,
+            &'parent (PredicateUsize, PredicateUsize),
+        )],
         pos: usize,
     ) -> bool {
         if let Some(arg) = iterators[pos].1.next() {
             args[pos].1 = arg;
-            if pos==0 && _has_collition(args, iterators) {
+            if pos == 0 && _has_collition(args, iterators) {
                 _args_iter(type_to_objects, iterators, args, pos)
             } else {
                 true
@@ -270,7 +361,7 @@ where
                 }
             }
             let r = _args_iter(type_to_objects, iterators, args, pos + 1);
-            if r && pos==0 && _has_collition(args, iterators) {
+            if r && pos == 0 && _has_collition(args, iterators) {
                 _args_iter(type_to_objects, iterators, args, pos)
             } else {
                 r
@@ -300,10 +391,10 @@ where
                     }
                 } else {
                     return Err(Error {
-                        input: None,
+                        // input: None,
                         kind: UndefinedType,
                         chain: None,
-                        range: kind.0.clone(),
+                        span: kind.0,
                     });
                 }
             }
@@ -324,185 +415,177 @@ where
     }
     // Itereate until the most significant iterator is done, calling closure over populated args
     let r = if _has_collition(&args, &iterators) {
-        _args_iter(type_to_objects, iterators.as_mut_slice(), args.as_mut_slice(), 0)
+        _args_iter(
+            type_to_objects,
+            iterators.as_mut_slice(),
+            args.as_mut_slice(),
+            0,
+        )
     } else {
         true
     };
-    let mut result = vec![f(args.as_slice())?];
-    if !r {return Ok(result)}
+    let mut result = if let Some(v) = f(args.as_slice())? {
+        vec![v]
+    } else {
+        Vec::new()
+    };
+
+    if !r {
+        return Ok(result);
+    }
     while _args_iter(
         type_to_objects,
         iterators.as_mut_slice(),
         args.as_mut_slice(),
         0,
     ) {
-        result.push(f(args.as_slice())?);
+        if let Some(v) = f(args.as_slice())? {
+            result.push(v);
+        }
     }
     Ok(result)
 }
 
 #[cfg(test)]
 pub mod tests {
+    use lazy_static::lazy_static;
+
     use crate::{
-        compiler::{compile_problem, CompiledAction, Instruction},
-        parser::{parse_domain, parse_problem},
+        compiler::{CompiledAction, Instruction},
+        Sources,
     };
 
     use super::*;
 
-    fn get_tiny_domain() -> (Domain<'static>, Problem<'static>) {
-        let domain = parse_domain(
-            "(define (domain unit-test)
-                (:predicates (a ?one) (b ?one ?two))
-                (:action aOne :parameters(?one ?two) 
-                    :precondition(and (a ?one) (b ?one ?two) (a ?two))
-                    :effect (and (not (a ?one)) (not (a ?two)))
-                ))",
-        )
-        .unwrap();
-        let problem = parse_problem(
-            "(define (problem unit-test)
-                (:domain unit-test)
-                (:objects a b c)
-                (:init (a a) (b a b))
-                (:goal (not (a a)))
-                )",
-            enumset::EnumSet::EMPTY,
-        )
-        .unwrap();
-        (domain, problem)
+    pub const TINY_DOMAIN_SRC: &str = "(define (domain unit-test)
+    (:predicates (a ?one) (b ?one ?two))
+    (:action aOne :parameters(?one ?two) 
+        :precondition(and (a ?one) (b ?one ?two) (a ?two))
+        :effect (and (not (a ?one)) (not (a ?two)))
+    ))";
+    pub const TINY_PROBLEM_SRC: &str = "(define (problem unit-test)
+    (:domain unit-test)
+    (:objects a b c)
+    (:init (a a) (b a b))
+    (:goal (not (a a)))
+    )";
+
+    lazy_static! {
+        pub static ref TINY_SOURCES: Sources = Sources {
+            domain_path: "stdin_domain".into(),
+            problem_path: "stdin_problem".into(),
+            domain_ad: ariadne::Source::from(TINY_DOMAIN_SRC),
+            problem_ad: ariadne::Source::from(TINY_PROBLEM_SRC),
+            domain_src: TINY_DOMAIN_SRC.into(),
+            problem_src: TINY_PROBLEM_SRC.into()
+        };
     }
 
     #[test]
     fn test_permutations() {
-        let type_to_objects = HashMap::from([("object", vec![(0..0, "a"), (0..0, "b"), (0..0, "c"), (0..0, "d")])]);
-        let list = vec![List{ items:vec![(0..0, "var1"), (0..0, "var2"), (0..0, "var3")], kind: Type::None}];
+        let type_to_objects = HashMap::from([("object", vec![(0, 0), (0, 1), (0, 2), (0, 3)])]);
+        let list = vec![List {
+            items: vec![
+                Name::new(0..0, "var1"),
+                Name::new(0..0, "var2"),
+                Name::new(0..0, "var3"),
+            ],
+            kind: Type::None,
+        }];
         let result = for_all_type_object_permutations(&type_to_objects, &list, |args| {
-            assert_eq!(args.len(), 3); 
-            Ok((args[0].1.1, args[1].1.1, args[2].1.1))
-        }).unwrap();
-        assert_eq!(result, vec![
-            // ("a", "a", "a"), 
-            // ("b", "a", "a"), 
-            // ("c", "a", "a"),
-            // ("d", "a", "a"), 
-            // ("a", "b", "a"), 
-            // ("b", "b", "a"), 
-            ("c", "b", "a"),
-            ("d", "b", "a"), 
-            // ("a", "c", "a"), 
-            ("b", "c", "a"), 
-            // ("c", "c", "a"),
-            ("d", "c", "a"),
-            // ("a", "d", "a"), 
-            ("b", "d", "a"), 
-            ("c", "d", "a"),
-            // ("d", "d", "a"),  
-            // ("a", "a", "b"), 
-            // ("b", "a", "b"), 
-            ("c", "a", "b"),
-            ("d", "a", "b"), 
-            // ("a", "b", "b"), 
-            // ("b", "b", "b"), 
-            // ("c", "b", "b"),
-            // ("d", "b", "b"), 
-            ("a", "c", "b"), 
-            // ("b", "c", "b"), 
-            // ("c", "c", "b"),
-            ("d", "c", "b"),
-            ("a", "d", "b"), 
-            // ("b", "d", "b"), 
-            ("c", "d", "b"),
-            // ("d", "d", "b"), 
-            // ("a", "a", "c"), 
-            ("b", "a", "c"), 
-            // ("c", "a", "c"),
-            ("d", "a", "c"), 
-            ("a", "b", "c"), 
-            // ("b", "b", "c"), 
-            // ("c", "b", "c"),
-            ("d", "b", "c"), 
-            // ("a", "c", "c"), 
-            // ("b", "c", "c"), 
-            // ("c", "c", "c"),
-            // ("d", "c", "c"),
-            ("a", "d", "c"), 
-            ("b", "d", "c"), 
-            // ("c", "d", "c"),
-            // ("d", "d", "c"), 
-            // ("a", "a", "d"), 
-            ("b", "a", "d"), 
-            ("c", "a", "d"),
-            // ("d", "a", "d"), 
-            ("a", "b", "d"), 
-            // ("b", "b", "d"), 
-            ("c", "b", "d"),
-            // ("d", "b", "d"), 
-            ("a", "c", "d"), 
-            ("b", "c", "d"), 
-            // ("c", "c", "d"),
-            // ("d", "c", "d"),
-            // ("a", "d", "d"), 
-            // ("b", "d", "d"), 
-            // ("c", "d", "d"),
-            // ("d", "d", "d"), 
-        ]);
+            assert_eq!(args.len(), 3);
+            Ok(Some((args[0].1 .1, args[1].1 .1, args[2].1 .1)))
+        })
+        .unwrap();
+        assert_eq!(
+            result,
+            vec![
+                // (0, 0, 0),
+                // (1, 0, 0),
+                // (2, 0, 0),
+                // (3, 0, 0),
+                // (0, 1, 0),
+                // (1, 1, 0),
+                (2, 1, 0),
+                (3, 1, 0),
+                // (0, 2, 0),
+                (1, 2, 0),
+                // (2, 2, 0),
+                (3, 2, 0),
+                // (0, 3, 0),
+                (1, 3, 0),
+                (2, 3, 0),
+                // (3, 3, 0),
+                // (0, 0, 1),
+                // (1, 0, 1),
+                (2, 0, 1),
+                (3, 0, 1),
+                // (0, 1, 1),
+                // (1, 1, 1),
+                // (2, 1, 1),
+                // (3, 1, 1),
+                (0, 2, 1),
+                // (1, 2, 1),
+                // (2, 2, 1),
+                (3, 2, 1),
+                (0, 3, 1),
+                // (1, 3, 1),
+                (2, 3, 1),
+                // (3, 3, 1),
+                // (0, 0, 2),
+                (1, 0, 2),
+                // (2, 0, 2),
+                (3, 0, 2),
+                (0, 1, 2),
+                // (1, 1, 2),
+                // (2, 1, 2),
+                (3, 1, 2),
+                // (0, 2, 2),
+                // (1, 2, 2),
+                // (2, 2, 2),
+                // (3, 2, 2),
+                (0, 3, 2),
+                (1, 3, 2),
+                // (2, 3, 2),
+                // (3, 3, 2),
+                // (0, 0, 3),
+                (1, 0, 3),
+                (2, 0, 3),
+                // (3, 0, 3),
+                (0, 1, 3),
+                // (1, 1, 3),
+                (2, 1, 3),
+                // (3, 1, 3),
+                (0, 2, 3),
+                (1, 2, 3),
+                // (2, 2, 3),
+                // (3, 2, 3),
+                // (0, 3, 3),
+                // (1, 3, 3),
+                // (2, 3, 3),
+                // (3, 3, 3),
+            ]
+        );
     }
 
     #[test]
     fn test_action() {
         use Instruction::*;
-        let (domain, problem) = get_tiny_domain();
-        let problem = compile_problem(&domain, &problem, EnumSet::EMPTY).unwrap();
-        assert_eq!(problem.memory_size, 9);
-        assert_eq!(problem.init, vec![And(0), SetState(0), And(0), SetState(5)]);
+        let (_domain, _problem, problem) = TINY_SOURCES.compile();
+        assert_eq!(problem.memory_size, 3);
+        assert_eq!(problem.init, vec![SetState(0)]);
         assert_eq!(problem.goal, vec![ReadState(0), Not]);
-        assert_eq!(problem.actions.len(), 6);
+        assert_eq!(problem.actions.len(), 1);
         assert_eq!(
             problem.actions[0],
-                CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(92..93, "b"), (90..91, "a")], // b a
-                    precondition: vec![ReadState(1), ReadState(3), ReadState(0), And(3)],
-                    effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(0)]
-                });
-        assert_eq!(
-            problem.actions[1],
             CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(94..95, "c"), (90..91, "a")], // c a
-                    precondition: vec![ReadState(2), ReadState(4), ReadState(0), And(3)],
-                    effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(0)]
-                });
-        assert_eq!(
-            problem.actions[2],
-            CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(90..91, "a"), (92..93, "b")], // a b
-                    precondition: vec![ReadState(0), ReadState(5), ReadState(1), And(3)],
-                    effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(1)]
-                });
-        assert_eq!(
-            problem.actions[3],CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(94..95, "c"), (92..93, "b")], // c b
-                    precondition: vec![ReadState(2), ReadState(6), ReadState(1), And(3)],
-                    effect: vec![And(0), Not, SetState(2), And(0), Not, SetState(1)]
-                });
-        assert_eq!(
-            problem.actions[4],CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(90..91, "a"), (94..95, "c")], // a c
-                    precondition: vec![ReadState(0), ReadState(7), ReadState(2), And(3)],
-                    effect: vec![And(0), Not, SetState(0), And(0), Not, SetState(2)]
-                });
-        assert_eq!(
-            problem.actions[5],CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(92..93, "b"), (94..95, "c")], // b c
-                    precondition: vec![ReadState(1), ReadState(8), ReadState(2), And(3)],
-                    effect: vec![And(0), Not, SetState(1), And(0), Not, SetState(2)]
-                });
+                domain_action_idx: 0,
+                args: vec![(0, 0), (0, 1)], // b a
+                precondition: vec![ReadState(0), ReadState(1), And(2)],
+                effect: vec![Not, SetState(0), Not, SetState(1)],
+                // action_graph: ActionGraph { priority: vec![] },
+            }
+        );
     }
 
     #[test]
