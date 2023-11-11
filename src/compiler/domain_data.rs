@@ -8,7 +8,7 @@ use enumset::EnumSet;
 
 use super::{
     action_graph::ActionGraph, for_all_type_object_permutations, AtomicFSkeleton, AtomicFormula,
-    Domain, List, Name, NegativeFormula, Objects, PredicateUsize, Problem, Span, StateUsize, Type,
+    Domain, List, Name, NegativeFormula, Objects, PredicateUsize, Problem, span::Span, StateUsize, Type, inertia::Inertia,
 };
 use crate::{Error, ErrorKind, Requirement};
 
@@ -33,17 +33,19 @@ pub struct DomainData<'src> {
     // Optimization structures:
     /// Each offset in this vector matches the offset of action list vector.
     pub action_graph: ActionGraph,
+    /// All Readable and Writable typed predicates used in the domain ordered by action
+    pub action_inertia: Vec<Inertia<AtomicFormula<'src, Type<'src>>>>,
     /// Set of all predicate names that have been identified as constant
-    pub constant_predicates: HashSet<Name<'src>>,
+    // pub constant_predicates: HashSet<Name<'src>>,
     /// Set of all concrete atomic formulas that have been identified to stay true
     /// no matter what actions have been executed
     pub const_true_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
     /// Set of all concrete atomic formulas that have been identified to stay false
     /// no matter what actions have been executed
     pub const_false_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
-    /// A map of AST Actions to Compiled action ranges. The range represents
-    /// All possible calls of a given action (for permutated objects)
-    pub compiled_action_ranges: Vec<Range<usize>>,
+    // /// A map of AST Actions to Compiled action ranges. The range represents
+    // /// All possible calls of a given action (for permutated objects)
+    // pub compiled_action_ranges: Vec<Range<usize>>,
 }
 
 /// Perform basic sanity checks like if the problem's domain match domain name
@@ -69,7 +71,6 @@ pub fn validate_problem<'src>(domain: &Domain<'src>, problem: &Problem<'src>) ->
 pub fn map_objects<'src>(
     domain: &Domain<'src>,
     problem: &'src Problem<'src>,
-    constants: HashSet<Name<'src>>,
 ) -> Result<DomainData<'src>, Error> {
     let requirements = domain.requirements | problem.requirements;
     let mut type_tree = HashMap::new();
@@ -129,153 +130,80 @@ pub fn map_objects<'src>(
             Type::Either(_) => todo!(),
         }
     }
-    let mut predicate_memory_map = HashMap::new();
-    let mut const_true_predicates = HashSet::new();
-    let mut const_false_predicates = HashSet::new();
-    let mut constant_predicates = HashSet::new();
-    //Iterate over predicates and its objects and build a memory map
-    for AtomicFSkeleton { name, variables } in &domain.predicates {
-        if !constants.contains(name) {
-            for_all_type_object_permutations::<_, NonZeroI8>(
-                &type_to_objects_map,
-                &variables,
-                |args| {
-                    let formula = AtomicFormula::predicate(
-                        name.clone(),
-                        args.iter()
-                            .map(|i| problem.objects.get_object(i.1 .0, i.1 .1).item)
-                            .collect(),
-                    );
-                    if !predicate_memory_map.contains_key(&formula) {
-                        predicate_memory_map
-                            .insert(formula, predicate_memory_map.len() as PredicateUsize);
-                    } else {
-                        panic!("Predicate memory map already contains this");
-                    }
-                    Ok(None)
-                },
-            )?;
-        } else {
-            for init in &problem.init {
-                match init {
-                    super::Init::AtomicFormula(af) => match af {
-                        NegativeFormula::Direct(af) => {
-                            if af.name().1 == name.1 {
-                                const_true_predicates.insert(af.clone());
-                                constant_predicates.insert(*name);
-                            }
-                        }
-                        NegativeFormula::Not(af) => {
-                            if af.name().1 == name.1 {
-                                const_false_predicates.insert(af.clone());
-                                constant_predicates.insert(*name);
-                            }
-                        }
-                    },
-                    super::Init::At(_, _) => todo!(),
-                    super::Init::Equals(_, _) => todo!(),
-                    super::Init::Is(_, _) => todo!(),
-                }
-            }
-        }
-    }
     Ok(DomainData {
         requirements,
         type_tree,
         type_src_pos,
         object_to_type_map,
         type_to_objects_map,
-        constant_predicates,
         object_src_pos,
-        predicate_memory_map,
+        predicate_memory_map: HashMap::new(),
+        action_inertia: Vec::new(),
         action_graph: ActionGraph::new(),
-        const_false_predicates,
-        const_true_predicates,
-        compiled_action_ranges: Vec::with_capacity(domain.actions.len()),
+        const_false_predicates: HashSet::new(),
+        const_true_predicates: HashSet::new(),
     })
 }
 
+// fn digitize_names<'src, 'ast>(
+//     compiler: &Compiler<'ast, 'src>,
+//     context: &mut Context<'src>
+// ) {
+//     let mut predicate_id_map:HashMap<&'src str, PredicateUsize> = HashMap::new();
+//     let mut id_predicate_map:Vec<Name<'src>> = Vec::new();
+//     let mut type_id_map:HashMap<Type<'src>, PredicateUsize> = HashMap::new();
+//     let mut id_type_map:Vec<Type<'src>> = Vec::new();
+//     let mut object_id_map:HashMap<&'src str, StateUsize> = HashMap::new();
+//     let mut id_object_map:Vec<Name<'src>> = Vec::new();
+//     let mut type_tree_map:HashMap<PredicateUsize, PredicateUsize> = HashMap::new();
+//     for AtomicFSkeleton { name, variables } in compiler.domain.predicates {
+//         let id = predicate_id_map.len() as PredicateUsize;
+//         if predicate_id_map.insert(name.1, id).is_some() {
+//             context.errors.push(Error { span: name.0, kind:RedefinedPredicate, chain:None })
+//         } else {
+//             if id_predicate_map.len() != id as usize { panic!("id to predicate and predicate to id maps diverged.")}
+//             id_predicate_map.push(name);
+
+//         }
+//     }
+//     type_id_map.insert(Type::Exact(Name::new(0..0, "object")), 0);
+//     for List { items, kind } in compiler.domain.types {
+//         let kind_id = if !type_id_map.contains_key(&kind) {
+//             let id = type_id_map.len() as PredicateUsize;
+//             type_id_map.insert(kind, id);
+//             if id_type_map.len() != id as usize { panic!("id to type and type to id maps diverged")}
+//             id_type_map.push(kind);
+//             id
+//         } else {
+//             *type_id_map.get(&kind).unwrap()
+//         };
+//         for item in items {
+//             let item = Type::Exact(item);
+//             let item_id = if !type_id_map.contains_key(&item) {
+//                 let id = type_id_map.len() as PredicateUsize;
+//                 type_id_map.insert(item, id);
+//                 if id_type_map.len() != id as usize { panic!("id to type and type to id maps diverged")}
+//                 id
+//             } else {
+//                 *type_id_map.get(&item).unwrap()
+//             };
+//             if type_tree_map.insert(item_id, kind_id).is_some() {
+//                 context.errors.push(Error { span: id_type_map[item_id as usize].span(), kind: RedefinedType, chain: None })
+//             }
+//         }
+//     }
+//     for List { items, kind } in compiler.problem.objects {
+//         for item in items {
+//             let id = object_id_map.len() as StateUsize;
+//             if object_id_map.insert(item.1, id).is_some() {
+//                 context.errors.push(Error { span: item.0, kind:RedefinedObject, chain:None })
+//             }
+//             if id_object_map.len() != id as usize { panic!("id to object and object to id maps diverged")}
+//             id_object_map.push(item);
+//         }
+//     }
+// }
+
 #[cfg(test)]
 mod test {
-    use crate::{
-        compiler::{
-            parse_domain, parse_problem,
-            tests::{TINY_DOMAIN_SRC, TINY_PROBLEM_SRC, TINY_SOURCES},
-        },
-        ReportPrinter,
-    };
-
-    use super::*;
-
-    #[test]
-    fn test_mapping() {
-        let domain = parse_domain(TINY_DOMAIN_SRC).unwrap_or_print_report(&TINY_SOURCES);
-        let problem = parse_problem(TINY_PROBLEM_SRC, domain.requirements)
-            .unwrap_or_print_report(&TINY_SOURCES);
-        let predicates = domain.get_predicate_names();
-        let objects = problem.get_objects();
-        let compiler = map_objects(&domain, &problem, HashSet::new()).unwrap();
-        assert_eq!(
-            compiler.predicate_memory_map,
-            HashMap::<AtomicFormula<'_, Name>, PredicateUsize>::from([
-                (
-                    AtomicFormula::predicate(predicates[0].clone(), vec![objects[0].clone()]),
-                    0
-                ),
-                (
-                    AtomicFormula::predicate(predicates[0].clone(), vec![objects[1].clone()]),
-                    1
-                ),
-                (
-                    AtomicFormula::predicate(predicates[0].clone(), vec![objects[2].clone()]),
-                    2
-                ),
-                // (vec!["pb", "a", "a"], 3),
-                (
-                    AtomicFormula::predicate(
-                        predicates[1].clone(),
-                        vec![objects[1].clone(), objects[0].clone()]
-                    ),
-                    3
-                ),
-                (
-                    AtomicFormula::predicate(
-                        predicates[1].clone(),
-                        vec![objects[2].clone(), objects[0].clone()]
-                    ),
-                    4
-                ),
-                (
-                    AtomicFormula::predicate(
-                        predicates[1].clone(),
-                        vec![objects[0].clone(), objects[1].clone()]
-                    ),
-                    5
-                ),
-                // (vec!["pb", "b", "b"], 7),
-                (
-                    AtomicFormula::predicate(
-                        predicates[1].clone(),
-                        vec![objects[2].clone(), objects[1].clone()]
-                    ),
-                    6
-                ),
-                (
-                    AtomicFormula::predicate(
-                        predicates[1].clone(),
-                        vec![objects[0].clone(), objects[2].clone()]
-                    ),
-                    7
-                ),
-                (
-                    AtomicFormula::predicate(
-                        predicates[1].clone(),
-                        vec![objects[1].clone(), objects[2].clone()]
-                    ),
-                    8
-                ),
-                // (vec!["pb", "c", "c"], 11),
-            ])
-        )
-    }
 }

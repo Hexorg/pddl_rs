@@ -1,157 +1,18 @@
 use std::{
     fmt::{Debug, Display},
     hash::Hash,
-    ops::Range,
+    ops::Range, collections::{HashMap, HashSet},
 };
+
+pub mod span;
+use span::*;
+pub mod name;
+use name::*;
 
 use enumset::{EnumSet, EnumSetType};
 
 use crate::{compiler::PredicateUsize, ErrorKind};
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-/// Span of an AST element in the source code. `start` and `end` represet byte-offsets in the source code
-/// Also keeps track if the AST element is in the problem source or domain.
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-    pub is_problem: bool,
-}
-impl<'src> Span {
-    pub fn expand(&self, add: usize) -> Self {
-        let mut copy = *self;
-        copy.end += add;
-        copy
-    }
-    pub fn change_end(&self, end: usize) -> Self {
-        Self {
-            start: self.start,
-            end,
-            is_problem: self.is_problem,
-        }
-    }
-    pub fn new_range(&self, range: Range<usize>) -> Self {
-        Self {
-            start: range.start,
-            end: range.end,
-            is_problem: self.is_problem,
-        }
-    }
-}
-
-impl<'src> Debug for Span {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}..{}", self.start, self.end))
-    }
-}
-
-impl<'src> Display for Span {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}..{}", self.start, self.end))
-    }
-}
-
-impl<'src> Into<Span> for Range<usize> {
-    fn into(self) -> Span {
-        Span {
-            start: self.start,
-            end: self.end,
-            is_problem: false,
-        }
-    }
-}
-impl<'src> Into<Range<usize>> for Span {
-    fn into(self) -> Range<usize> {
-        self.start..self.end
-    }
-}
-
-/// Any AST Node that spans some source code characters.
-pub trait SpannedAst<'src> {
-    fn span(&self) -> Span;
-}
-
-/// Any AST Node that spans some source code characters and allows that span to be changed.
-pub trait SpannedAstMut<'src>: SpannedAst<'src> {
-    fn span_mut(&mut self) -> &mut Span;
-}
-impl<'src, O> SpannedAst<'src> for Spanned<'src, O> {
-    #[inline]
-    fn span(&self) -> Span {
-        self.0
-    }
-}
-impl<'src, O> SpannedAstMut<'src> for Spanned<'src, O> {
-    #[inline]
-    fn span_mut(&mut self) -> &mut Span {
-        &mut self.0
-    }
-}
-
-pub type Spanned<'src, O> = (Span, O);
-
-impl<'src, O> SpannedAst<'src> for Vec<O>
-where
-    O: SpannedAst<'src>,
-{
-    fn span(&self) -> Span {
-        let (start, is_problem) = self
-            .first()
-            .and_then(|r| Some((r.span().start, r.span().is_problem)))
-            .unwrap_or((0, false));
-        let end = self
-            .last()
-            .and_then(|r| Some(r.span().end))
-            .unwrap_or(start);
-        Span {
-            start,
-            end,
-            is_problem,
-        }
-    }
-}
-#[derive(Clone, Copy)]
-pub struct Name<'src>(pub Span, pub &'src str);
-impl<'src> Name<'src> {
-    pub fn new(range: impl Into<Range<usize>>, name: &'src str) -> Self {
-        Self(range.into().into(), name)
-    }
-}
-impl<'src> Display for Name<'src> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.1)
-    }
-}
-impl<'src> Debug for Name<'src> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.1)
-    }
-}
-impl<'src> Into<Name<'src>> for Spanned<'src, &'src str> {
-    fn into(self) -> Name<'src> {
-        Name(self.0, self.1)
-    }
-}
-impl<'src> SpannedAst<'src> for Name<'src> {
-    fn span(&self) -> Span {
-        self.0
-    }
-}
-impl<'src> SpannedAstMut<'src> for Name<'src> {
-    fn span_mut(&mut self) -> &mut Span {
-        &mut self.0
-    }
-}
-impl<'src> PartialEq for Name<'src> {
-    fn eq(&self, other: &Self) -> bool {
-        self.1 == other.1
-    }
-}
-impl<'src> Eq for Name<'src> {}
-impl<'src> Hash for Name<'src> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.1.hash(state)
-    }
-}
 
 pub struct TypedItem<'src> {
     pub item: Name<'src>,
@@ -160,6 +21,15 @@ pub struct TypedItem<'src> {
 
 pub trait Objects {
     fn get_object(&self, row: PredicateUsize, col: PredicateUsize) -> TypedItem;
+}
+impl<'src> Objects for Vec<List<'src>> {
+    fn get_object(&self, row: PredicateUsize, col: PredicateUsize) -> TypedItem {
+        let List { items, kind } = &self[row as usize];
+        TypedItem {
+            item: items[col as usize],
+            kind,
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -175,15 +45,6 @@ pub struct Problem<'src> {
     // pub length: Option<LengthSpecification>, // deprecated since PDDL 2.1
 }
 
-impl<'src> Objects for Vec<List<'src>> {
-    fn get_object(&self, row: PredicateUsize, col: PredicateUsize) -> TypedItem {
-        let List { items, kind } = &self[row as usize];
-        TypedItem {
-            item: items[col as usize],
-            kind,
-        }
-    }
-}
 
 impl<'src> Problem<'src> {
     pub fn get_objects(&self) -> Vec<Name<'src>> {
@@ -383,11 +244,11 @@ pub enum GD<'src> {
 #[derive(PartialEq, Debug)]
 pub enum FluentExpression<'src> {
     Number(i64),                                               // :numeric-fluents
-    Subtract(Box<(Spanned<'src, Self>, Spanned<'src, Self>)>), // :numeric-fluents
-    Negate(Box<Spanned<'src, Self>>),
-    Divide(Box<(Spanned<'src, Self>, Spanned<'src, Self>)>), // :numeric-fluents
-    Add(Vec<Spanned<'src, Self>>),                           // :numeric-fluents
-    Multiply(Vec<Spanned<'src, Self>>),                      // :numeric-fluents
+    Subtract(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
+    Negate(Box<Spanned<Self>>),
+    Divide(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
+    Add(Vec<Spanned<Self>>),                           // :numeric-fluents
+    Multiply(Vec<Spanned<Self>>),                      // :numeric-fluents
     Function(FunctionTerm<'src>),                            // :numeric-fluents
 }
 
@@ -397,13 +258,13 @@ pub enum Effect<'src> {
     Forall(Forall<'src, Self>), // :conditional−effects
     When(When<GD<'src>, Self>), // :conditional−effects
     NegativeFormula(NegativeFormula<'src, Term<'src>>),
-    Assign(FunctionTerm<'src>, Spanned<'src, FluentExpression<'src>>), // :numeric-fluents
+    Assign(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
     AssignTerm(FunctionTerm<'src>, Term<'src>),
     AssignUndefined(FunctionTerm<'src>), // :object-fluents
-    ScaleUp(FunctionTerm<'src>, Spanned<'src, FluentExpression<'src>>), // :numeric-fluents
-    ScaleDown(FunctionTerm<'src>, Spanned<'src, FluentExpression<'src>>), // :numeric-fluents
-    Increase(FunctionTerm<'src>, Spanned<'src, FluentExpression<'src>>), // :numeric-fluents
-    Decrease(FunctionTerm<'src>, Spanned<'src, FluentExpression<'src>>), // :numeric-fluents
+    ScaleUp(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
+    ScaleDown(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
+    Increase(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
+    Decrease(FunctionTerm<'src>, Spanned<FluentExpression<'src>>), // :numeric-fluents
 }
 
 #[derive(PartialEq, Debug)]
@@ -412,9 +273,9 @@ pub enum DurationConstraint<'src> {
     And(Vec<Self>), // :duration−inequalities
     AtStart(Box<Self>),
     AtEnd(Box<Self>),
-    GreaterOrEquals(Spanned<'src, FluentExpression<'src>>), // :duration−inequalities
-    LessThanOrEquals(Spanned<'src, FluentExpression<'src>>), // :duration−inequalities
-    Equals(Spanned<'src, FluentExpression<'src>>),
+    GreaterOrEquals(Spanned<FluentExpression<'src>>), // :duration−inequalities
+    LessThanOrEquals(Spanned<FluentExpression<'src>>), // :duration−inequalities
+    Equals(Spanned<FluentExpression<'src>>),
 }
 
 #[derive(PartialEq, Debug)]
@@ -481,7 +342,7 @@ pub enum TimedGD<'src> {
 
 #[derive(PartialEq, Debug)]
 pub enum MetricFluentExpr<'src> {
-    FExpr(Spanned<'src, FluentExpression<'src>>),
+    FExpr(Spanned<FluentExpression<'src>>),
     TotalTime(),
     IsViolated(Name<'src>),
 }
@@ -577,11 +438,35 @@ pub struct AtomicFSkeleton<'src> {
     pub variables: Vec<List<'src>>,
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub enum Type<'src> {
     None,
     Either(Vec<Name<'src>>),
     Exact(Name<'src>),
+}
+
+impl<'src> SpannedAst for Type<'src> {
+    fn span(&self) -> Span {
+        match self {
+            Type::None => Span { start: 0, end: 0, is_problem: false },
+            Type::Either(vec) => vec.span(),
+            Type::Exact(name) => name.span(),
+        }
+    }
+}
+impl<'src> Display for Type<'src> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::None => f.write_str("[None]"),
+            Type::Either(vec) => f.write_fmt(format_args!("(either {})", vec.iter().map(|n| n.1).collect::<Vec<_>>().join(", "))),
+            Type::Exact(name) => f.write_str(name.1),
+        }
+    }
+}
+impl<'src> Debug for Type<'src> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as Display>::fmt(&self, f)
+    }
 }
 
 impl<'src> Type<'src> {
@@ -607,7 +492,7 @@ impl<'src> Type<'src> {
 #[derive(PartialEq, Debug)]
 pub enum FunctionType<'src> {
     None,
-    Numeric(Spanned<'src, i64>),
+    Numeric(Spanned<i64>),
     Typed(Type<'src>),
 }
 
@@ -623,10 +508,23 @@ pub struct List<'src> {
     pub kind: Type<'src>,
 }
 
-#[derive(PartialEq, Debug, Hash, Eq, Clone)]
+#[derive(PartialEq, Hash, Eq, Clone)]
 pub enum AtomicFormula<'src, T> {
     Predicate(Name<'src>, Vec<T>),
     Equality(T, T),
+}
+impl<'src, T> Display for AtomicFormula<'src, T> where T:Display{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AtomicFormula::Predicate(name, vec) => f.write_fmt(format_args!("{}({})", name, vec.iter().map(|i| format!("{}", i)).collect::<Vec<_>>().join(", "))),
+            AtomicFormula::Equality(left, right) => f.write_fmt(format_args!("{} = {}", left, right)),
+        }
+    }
+}
+impl<'src, T> Debug for AtomicFormula<'src, T> where T:Display {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as Display>::fmt(self, f)
+    }
 }
 impl<'src, T> AtomicFormula<'src, T> {
     pub fn name(&self) -> Name<'src> {
@@ -640,6 +538,34 @@ impl<'src, T> AtomicFormula<'src, T> {
 impl<'src> AtomicFormula<'src, Name<'src>> {
     pub fn predicate(name: Name<'src>, args: Vec<Name<'src>>) -> Self {
         Self::Predicate(name, args)
+    }
+    pub fn to_typed(&self, type_tree: &HashMap<&'src str, Name<'src>>) -> HashSet<AtomicFormula<'src, Type<'src>>> {
+        let mut result = HashSet::new();
+        match self {
+            AtomicFormula::Predicate(predicate, objects) => {
+                let mut type_vec = objects.clone();
+                let mut more_iterations = true;
+                while more_iterations {
+                    more_iterations = false;
+                    let mut new_type_vec = Vec::new();
+                    if type_tree.len() > 0 {
+                        for obj in &type_vec {
+                                let type_name = *type_tree.get(obj.1).unwrap();
+                                if type_name.1 != "object" {
+                                    more_iterations = true;
+                                }
+                                new_type_vec.push(type_name);
+                        }
+                        result.insert(AtomicFormula::Predicate(*predicate, new_type_vec.iter().map(|t| Type::Exact(*t)).collect()));
+                    } else {
+                        result.insert(AtomicFormula::Predicate(*predicate, (0..type_vec.len()).map(|_| Type::None).collect()));
+                    }
+                    type_vec = new_type_vec;
+                }
+            },
+            AtomicFormula::Equality(_, _) => todo!(),
+        }
+        result
     }
 }
 impl<'src> Into<AtomicFormula<'src, Term<'src>>> for &AtomicFormula<'src, Name<'src>> {
@@ -708,7 +634,7 @@ impl<'src> AtomicFormula<'src, Term<'src>> {
     pub fn concrete<'a>(
         &self,
         problem: &'a Problem<'src>,
-        args: &[(&Name<'src>, &(PredicateUsize, PredicateUsize))],
+        args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
     ) -> AtomicFormula<'src, Name<'src>>
     where
         'a: 'src,
@@ -722,7 +648,7 @@ impl<'src> AtomicFormula<'src, Term<'src>> {
                         Term::Variable(var) => args
                             .iter()
                             .find_map(|(from, to)| {
-                                if *from == var {
+                                if from == var {
                                     Some(problem.objects.get_object(to.0, to.1).item)
                                 } else {
                                     None
@@ -740,7 +666,7 @@ impl<'src> AtomicFormula<'src, Term<'src>> {
 }
 
 #[derive(PartialEq, Debug)]
-pub enum NegativeFormula<'src, T> {
+pub enum NegativeFormula<'src, T> where T:Display{
     Direct(AtomicFormula<'src, T>),
     Not(AtomicFormula<'src, T>),
 }
@@ -756,7 +682,7 @@ impl<'src> Debug for FunctionTerm<'src> {
         f.write_fmt(format_args!("{}({:?})", self.name.1, self.terms))
     }
 }
-impl<'src> SpannedAst<'src> for FunctionTerm<'src> {
+impl<'src> SpannedAst for FunctionTerm<'src> {
     fn span(&self) -> Span {
         self.name.0.change_end(self.terms.span().end)
     }
@@ -778,8 +704,13 @@ impl<'src> Debug for Term<'src> {
         }
     }
 }
+impl<'src> Display for Term<'src> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as Debug>::fmt(&self, f)
+    }
+}
 
-impl<'src> SpannedAst<'src> for Term<'src> {
+impl<'src> SpannedAst for Term<'src> {
     fn span(&self) -> Span {
         match self {
             Self::Name(n) => n.0,

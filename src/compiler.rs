@@ -7,15 +7,16 @@ use first_pass::first_pass;
 mod final_pass;
 use enumset::{EnumSet, EnumSetType};
 use final_pass::final_pass;
+mod multipass_test;
 
 // optimization mods
 pub mod action_graph;
 mod inertia;
 
-pub use crate::parser::{ast::*, *};
+pub use crate::parser::{ast::{*, name::Name}, *};
 use crate::{Error, ErrorKind};
 
-use self::action_graph::ActionGraph;
+use self::{action_graph::ActionGraph, domain_data::{validate_problem, map_objects}};
 
 pub type PredicateUsize = u16;
 pub type ASTActionUsize = u16;
@@ -280,13 +281,17 @@ impl Optimization {
 
 /// Compile and optimize parsed [`Domain`] and [`Problem`] structures into a compiled problem ready for using in search methods.
 /// Load them from a file using [`parse_domain`] and [`parse_problem`] functions.
-pub fn compile_problem<'src>(
-    domain: &Domain<'src>,
-    problem: &Problem<'src>,
+pub fn compile_problem<'src, 'ast>(
+    domain: &'ast Domain<'src>,
+    problem: &'ast Problem<'src>,
 ) -> Result<CompiledProblem, Error> {
-    let data = first_pass(domain, problem)?;
-    final_pass(data, domain, problem)
+    validate_problem(domain, problem)?;
+    let mut domain_data = map_objects(domain, problem)?;
+    first_pass(domain, problem, &mut domain_data)?;
+    let c = final_pass(domain, problem, &mut domain_data)?;
+    Ok(c)
 }
+
 
 /// Given a list of types, use a type to object map and generate all possible
 /// permutations of the objects fitting the list.
@@ -302,14 +307,14 @@ fn for_all_type_object_permutations<'src, F, O>(
     mut f: F,
 ) -> Result<Vec<O>, Error>
 where
-    F: FnMut(&[(&Name<'src>, &(PredicateUsize, PredicateUsize))]) -> Result<Option<O>, Error>,
+    F: FnMut(&[(Name<'src>, (PredicateUsize, PredicateUsize))]) -> Result<Option<O>, Error>,
 {
     use ErrorKind::UndefinedType;
 
     fn _has_collition<'parent, 'src>(
         args: &[(
-            &'parent Name<'src>,
-            &'parent (PredicateUsize, PredicateUsize),
+            Name<'src>,
+            (PredicateUsize, PredicateUsize),
         )],
         iterators: &[(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
     ) -> bool {
@@ -339,13 +344,13 @@ where
         type_to_objects: &'parent HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
         iterators: &mut [(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
         args: &mut [(
-            &'parent Name<'src>,
-            &'parent (PredicateUsize, PredicateUsize),
+            Name<'src>,
+            (PredicateUsize, PredicateUsize),
         )],
         pos: usize,
     ) -> bool {
         if let Some(arg) = iterators[pos].1.next() {
-            args[pos].1 = arg;
+            args[pos].1 = *arg;
             if pos == 0 && _has_collition(args, iterators) {
                 _args_iter(type_to_objects, iterators, args, pos)
             } else {
@@ -357,7 +362,7 @@ where
             if let Some(vec) = type_to_objects.get(kind) {
                 iterators[pos].1 = vec.iter();
                 if let Some(arg) = iterators[pos].1.next() {
-                    args[pos].1 = arg;
+                    args[pos].1 = *arg;
                 }
             }
             let r = _args_iter(type_to_objects, iterators, args, pos + 1);
@@ -383,7 +388,7 @@ where
                     for item in items {
                         iterators.push((kind.1, objects_vec.iter()));
                         if let Some(next) = iterators.last_mut().unwrap().1.next() {
-                            args.push((item, next));
+                            args.push((*item, *next));
                         } else {
                             // Not enough objects to populate this list
                             todo!()
@@ -403,7 +408,7 @@ where
                 for item in items {
                     iterators.push(("object", objects_vec.iter()));
                     if let Some(next) = iterators.last_mut().unwrap().1.next() {
-                        args.push((item, next));
+                        args.push((*item, *next));
                     } else {
                         // Not enough objects to populate this list
                         todo!()
@@ -571,7 +576,8 @@ pub mod tests {
     #[test]
     fn test_action() {
         use Instruction::*;
-        let (_domain, _problem, problem) = TINY_SOURCES.compile();
+        let (domain, problem) = TINY_SOURCES.parse();
+        let problem = TINY_SOURCES.compile(&domain, &problem);
         assert_eq!(problem.memory_size, 3);
         assert_eq!(problem.init, vec![SetState(0)]);
         assert_eq!(problem.goal, vec![ReadState(0), Not]);

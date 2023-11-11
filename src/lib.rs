@@ -51,8 +51,8 @@ use compiler::{compile_problem, parse_domain, parse_problem, CompiledProblem, Do
 // use compiler::{Span, Input};
 /// Used to represent domain requirements.
 pub use enumset::EnumSet;
-use parser::ast::Span;
-pub use parser::ast::{Objects, Requirement};
+use parser::ast::span::Span;
+pub use parser::ast::{Objects, Requirement, span::SpannedAst};
 use std::{ops::Range, path::PathBuf};
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -82,7 +82,12 @@ enum ErrorKind {
     MissmatchedDomain,
     UndefinedType,
     UnreadPredicate,
+    RedefinedPredicate,
+    RedefinedObject,
+    RedefinedType,
     ExpectedName,
+    UnmetGoal,
+    UnmetPredicate,
 }
 
 /// Parser and Compiler Error that uses Adriane to generate a pretty report and point at the right
@@ -118,7 +123,7 @@ impl<'src> nom::error::ParseError<parser::Input<'src>> for Error {
         Self {
             kind: ErrorKind::Nom(kind),
             chain: Some(Box::new(other)),
-            span: parser::ast::SpannedAst::span(&input),
+            span: SpannedAst::span(&input),
         }
     }
 }
@@ -148,12 +153,15 @@ impl Sources {
         }
     }
 
-    pub fn compile(&self) -> (Domain, Problem, CompiledProblem) {
+    pub fn parse(&self) -> (Domain, Problem) {
         let domain = parse_domain(&self.domain_src).unwrap_or_print_report(self);
         let problem =
             parse_problem(&self.problem_src, domain.requirements).unwrap_or_print_report(self);
-        let c_problem = compile_problem(&domain, &problem).unwrap_or_print_report(self);
-        (domain, problem, c_problem)
+        (domain, problem)
+    }
+
+    pub fn compile(&self, domain:&Domain, problem:&Problem) -> CompiledProblem {
+        compile_problem(domain, problem).unwrap_or_print_report(self)
     }
 }
 
@@ -200,7 +208,7 @@ impl Error {
         Self {
             kind: ErrorKind::UnsetRequirement(requirements),
             chain: None,
-            span: parser::ast::SpannedAst::span(&input),
+            span: SpannedAst::span(&input),
         }
     }
 }
@@ -246,6 +254,11 @@ impl Error {
             ExpectedName => label.with_message("Expected Name"),
             UndefinedType => label.with_message("Domain :types() does not declare this type."),
             UnreadPredicate => label.with_message(format!("Unread predicate.")),
+            RedefinedPredicate => label.with_message("Predicate already defined."),
+            RedefinedObject => label.with_message("Object already defined."),
+            RedefinedType => label.with_message("Type already defined."),
+            UnmetGoal => label.with_message("Problem goal can not be met."),
+            UnmetPredicate => label.with_message("Predicate is impossible to satisfy.")
         }
     }
     pub fn report<'fname>(

@@ -1,4 +1,4 @@
-use super::ast::{Requirement, Span, SpannedAst};
+use super::ast::{Requirement, span::{Span, SpannedAst}};
 use enumset::EnumSet;
 use nom::{Compare, InputIter, InputLength, InputTake, Offset, Slice, UnspecializedInput};
 use std::{
@@ -132,7 +132,7 @@ impl<'src> Offset for Input<'src> {
     }
 }
 impl<'src> UnspecializedInput for Input<'src> {}
-impl<'src> SpannedAst<'src> for Input<'src> {
+impl<'src> SpannedAst for Input<'src> {
     fn span(&self) -> Span {
         Span {
             start: self.input_pos,

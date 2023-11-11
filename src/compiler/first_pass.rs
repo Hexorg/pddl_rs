@@ -1,59 +1,70 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
 use crate::{Error, ErrorKind};
 
 use super::{
     domain_data::{map_objects, validate_problem, DomainData},
     AtomicFSkeleton, AtomicFormula, BasicAction, Domain, Effect, List, Name, NegativeFormula,
-    PreconditionExpr, Problem, Term, Type, GD,
+    PreconditionExpr, Problem, Term, Type, GD, inertia::Inertia, StateUsize, CompiledActionUsize, for_all_type_object_permutations, Init,
 };
 
 /// Compiler context that gets passed to all AST visitors to keep track of
 /// inter-node state as we are traversing the Abstract Systax Tree
-struct Context<'ast, 'src> {
-    pub is_negative: bool,
-    pub parameters: &'ast Vec<List<'src>>,
-    pub negative: HashSet<AtomicFormula<'src, Type<'src>>>,
-    pub positive: HashSet<AtomicFormula<'src, Type<'src>>>,
+#[derive(PartialEq, Eq)]
+enum ContextKind {
+    Precondition,
+    Effect,
 }
 
-impl<'ast, 'src> Context<'ast, 'src> {
-    pub fn new(parameters: &'ast Vec<List<'src>>) -> Self {
-        Self {
-            is_negative: false,
-            parameters,
-            negative: HashSet::new(),
-            positive: HashSet::new(),
-        }
+/// Gets passed to all AST visitors to keep track of inter-node state as we are
+/// traversing the Abstract Systax Tree
+struct Context<'src, 'pass> {
+    pub problem:&'pass Problem<'src>,
+    pub kind: ContextKind,
+    pub is_negative: bool,
+    pub action_id: CompiledActionUsize,
+    pub predicate_memory_map: HashMap<AtomicFormula<'src, Name<'src>>, StateUsize>,
+    pub unset_predicates:HashSet<Name<'src>>,
+    pub unread_predicates:HashSet<Name<'src>>,
+    pub action_inertia: Vec<Inertia<StateUsize>>,
+    pub state_inertia: Vec<Inertia<CompiledActionUsize>>,
+}
+
+impl<'src, 'pass> Context<'src, 'pass> {
+    pub fn new(problem: &'pass Problem<'src>) -> Self {
+        Self { problem,
+            kind:ContextKind::Precondition,
+            is_negative:false, 
+            action_id: 0,
+            predicate_memory_map:HashMap::new(), 
+            unset_predicates: HashSet::new(),
+            unread_predicates: HashSet::new(),
+            action_inertia:Vec::new(), 
+            state_inertia:Vec::new() }
     }
 }
 
 /// First pass over the Abstract Syntax Tree - performs basic sanity checks,
 /// And populates structures needed for optimization of the [`CompiledProblem`]
 /// emitted in the [`final_pass`]
-pub fn first_pass<'src>(
-    domain: &Domain<'src>,
-    problem: &'src Problem<'src>,
-) -> Result<DomainData<'src>, Error> {
-    validate_problem(domain, problem)?;
-    let mut unread_predicates: HashSet<Name<'src>> =
-        HashSet::with_capacity(domain.predicates.len());
-    let mut unset_predicates: HashSet<Name<'src>> = HashSet::with_capacity(domain.predicates.len());
+pub fn first_pass<'src, 'ast>(
+    domain: &'ast Domain<'src>,
+    problem: &'ast Problem<'src>,
+    domain_data: &mut DomainData<'src>,
+) -> Result<(), Error> where 'ast:'src {
+    let mut context = Context::new(problem);
+
     for AtomicFSkeleton { name, .. } in &domain.predicates {
-        unread_predicates.insert(*name);
-        unset_predicates.insert(*name);
+        context.unread_predicates.insert(*name);
+        context.unset_predicates.insert(*name);
     }
-    for (_idx, action) in domain.actions.iter().enumerate() {
-        match action {
-            super::Action::Basic(ba) => {
-                visit_basic_action(ba, &mut unread_predicates, &mut unset_predicates)
-            }
-            super::Action::Durative(_) => todo!(),
-            super::Action::Derived(_, _) => todo!(),
-        }
-    }
+
+    visit_init(&problem.init, &mut context)?;
+    visit_all_actions(domain, &domain_data, &mut context)?;
+    visit_precondition(&problem.goal, None, &mut context)?;
+    
     let mut last_error = None;
-    for unread in unread_predicates {
+    for unread in context.unread_predicates {
         let error = Error {
             span: unread.0,
             kind: ErrorKind::UnreadPredicate,
@@ -64,95 +75,175 @@ pub fn first_pass<'src>(
     if let Some(e) = last_error {
         Err(e)
     } else {
-        map_objects(domain, problem, unset_predicates)
+        Ok(())
     }
 }
 
-fn visit_basic_action<'src>(
-    action: &BasicAction<'src>,
-    unread: &mut HashSet<Name<'src>>,
-    unset: &mut HashSet<Name<'src>>,
-) {
-    if let Some(effect) = &action.effect {
-        let mut context = Context::new(&action.parameters);
-        visit_effect(effect, &mut context);
-        for predicate in context.positive.union(&context.negative) {
-            match predicate {
-                AtomicFormula::Predicate(name, _) => unset.remove(name),
-                AtomicFormula::Equality(_, _) => todo!(),
-            };
+fn visit_init(
+    init:&[Init],
+    context: &mut Context
+) -> Result<(), Error> {
+    for init in init {
+        match init {
+            Init::AtomicFormula(formula) => visit_negative_name_formula(formula, context)?,
+            Init::At(_, _) => todo!(),
+            Init::Equals(_, _) => todo!(),
+            Init::Is(_, _) => todo!(),
         }
     }
+    Ok(())
+}
+
+fn visit_all_actions(
+    domain:&Domain, 
+    domain_data:&DomainData, 
+    context:&mut Context
+) -> Result<(), Error> {
+    let mut action_id = 0;
+    for action in &domain.actions {
+        match action {
+            super::Action::Basic(ba) => {
+                for_all_type_object_permutations(&domain_data.type_to_objects_map, &ba.parameters, |args| {
+                    visit_basic_action(ba, args, context)
+                });
+            },
+            super::Action::Durative(_) => todo!(),
+            super::Action::Derived(_, _) => todo!(),
+        }
+        
+    }
+    Ok(())
+}
+
+fn visit_basic_action(
+    action: &BasicAction,
+    args: &[(Name, (u16, u16))],
+    context: &mut Context
+) -> Result<Option<bool>, Error> {
     if let Some(precondition) = &action.precondition {
-        let mut context = Context::new(&action.parameters);
-        visit_precondition(precondition, &mut context);
-        for predicate in context.positive.union(&context.negative) {
-            match predicate {
-                AtomicFormula::Predicate(name, ..) => unread.remove(name),
-                AtomicFormula::Equality(_, _) => todo!(),
-            };
-        }
+        context.kind = ContextKind::Precondition;
+        visit_precondition(precondition, Some(args), context)?;
     }
+
+    if let Some(effect) = &action.effect {
+        context.kind = ContextKind::Effect;
+        visit_effect(effect, args, context)?;
+    }
+    Ok(None)
 }
 
-fn visit_effect<'ast, 'src>(effect: &Effect<'src>, context: &mut Context<'ast, 'src>) {
+fn visit_effect(
+    effect: &Effect, 
+    args: &[(Name, (u16, u16))],
+    context: &mut Context
+) -> Result<(), Error> {
     match effect {
-        super::Effect::And(vec) => vec.iter().for_each(|effect| visit_effect(effect, context)),
+        super::Effect::And(vec) => { for effect in vec { visit_effect(effect, args, context)? } Ok(()) },
         super::Effect::Forall(_) => todo!(),
         super::Effect::When(_) => todo!(),
-        super::Effect::NegativeFormula(formula) => visit_negative_formula(formula, context),
+        super::Effect::NegativeFormula(formula) => visit_negative_term_formula(formula, args, context),
         super::Effect::Assign(_, _) => todo!(),
         super::Effect::AssignTerm(_, _) => todo!(),
         super::Effect::AssignUndefined(_) => todo!(),
         super::Effect::ScaleUp(_, _) => todo!(),
         super::Effect::ScaleDown(_, _) => todo!(),
-        super::Effect::Increase(_, _) => (),
+        super::Effect::Increase(_, _) => Ok(()),
         super::Effect::Decrease(_, _) => todo!(),
     }
 }
 
-fn visit_negative_formula<'ast, 'src>(
-    formula: &NegativeFormula<'src, Term<'src>>,
-    context: &mut Context<'ast, 'src>,
-) {
+fn visit_negative_term_formula(
+    formula: &NegativeFormula<Term>,
+    args: &[(Name, (u16, u16))],
+    context: &mut Context,
+) -> Result<(), Error> {
     match formula {
-        NegativeFormula::Direct(formula) => visit_term_formula(formula, context),
-        NegativeFormula::Not(formula) => visit_term_formula(formula, context),
+        NegativeFormula::Direct(formula) => visit_term_formula(formula, Some(args), context),
+        NegativeFormula::Not(formula) => { 
+            let is_negative = context.is_negative;
+            context.is_negative = !is_negative;
+            let r = visit_term_formula(formula, Some(args), context);
+            context.is_negative = is_negative;
+            r
+        },
     }
 }
 
-fn visit_term_formula<'ast, 'src>(
-    formula: &AtomicFormula<'src, Term<'src>>,
-    context: &mut Context<'ast, 'src>,
-) {
-    let type_formula = formula.generalized_to_type(context.parameters);
-    if context.is_negative {
-        context.negative.insert(type_formula);
-    } else {
-        context.positive.insert(type_formula);
+fn visit_negative_name_formula(
+    formula: &NegativeFormula<Name>,
+    context: &mut Context,
+) -> Result<(), Error> {
+    match formula {
+        NegativeFormula::Direct(formula) => visit_name_formula(formula, context),
+        NegativeFormula::Not(formula) => { let is_negative = context.is_negative;
+            context.is_negative = !is_negative;
+            let r = visit_name_formula(formula, context);
+            context.is_negative = is_negative;
+            r
+        },
     }
 }
 
-fn visit_precondition<'ast, 'src>(
-    precondition: &PreconditionExpr<'src>,
-    context: &mut Context<'ast, 'src>,
-) {
+fn visit_term_formula(
+    formula: &AtomicFormula<Term>,
+    args: Option<&[(Name, (u16, u16))]>,
+    context: &mut Context,
+) -> Result<(), Error> {
+    let formula = match formula.try_into() {
+        Ok(v) => v,
+        Err(e) => if let Some(args) = args { 
+            formula.concrete(context.problem, args) 
+        } else { 
+            return Err(e); 
+        }
+    };
+
+
+    // match context.kind {
+    //     ContextKind::Precondition => todo!(),
+    //     ContextKind::Effect => todo!(),
+    // }
+
+    Ok(())
+}
+
+fn visit_name_formula(
+    formula: &AtomicFormula<Name>,
+    context: &mut Context,
+) -> Result<(), Error> {
+    Ok(())
+}
+
+fn visit_precondition(
+    precondition: &PreconditionExpr,
+    args: Option<&[(Name, (u16, u16))]>,
+    context: &mut Context,
+) -> Result<(), Error> {
     match precondition {
-        PreconditionExpr::And(vec) => vec
-            .iter()
-            .for_each(|precondition| visit_precondition(precondition, context)),
+        PreconditionExpr::And(vec) => { for precondition in vec { visit_precondition(precondition, args, context)? } Ok(()) },
+            
         PreconditionExpr::Forall(_) => todo!(),
         PreconditionExpr::Preference(_) => todo!(),
-        PreconditionExpr::GD(gd) => visit_gd(gd, context),
+        PreconditionExpr::GD(gd) => visit_gd(gd, args, context),
     }
 }
 
-fn visit_gd<'ast, 'src>(gd: &GD<'src>, context: &mut Context<'ast, 'src>) {
+fn visit_gd(
+    gd: &GD, 
+    args: Option<&[(Name, (u16, u16))]>,
+    context: &mut Context
+) -> Result<(), Error> {
     match gd {
-        GD::AtomicFormula(formula) => visit_term_formula(formula, context),
-        GD::And(vec) => vec.iter().for_each(|gd| visit_gd(gd, context)),
+        GD::AtomicFormula(formula) => visit_term_formula(formula, args, context),
+        GD::And(vec) => { for gd in vec { visit_gd(gd, args, context)? } Ok(())},
         GD::Or(_) => todo!(),
-        GD::Not(gd) => visit_gd(gd, context),
+        GD::Not(gd) => {
+            let is_negative = context.is_negative;
+            context.is_negative = !is_negative;
+            let r = visit_gd(gd, args, context);
+            context.is_negative = is_negative;
+            r
+        },
         GD::Imply(_) => todo!(),
         GD::Exists(_) => todo!(),
         GD::Forall(_) => todo!(),
@@ -167,23 +258,4 @@ fn visit_gd<'ast, 'src>(gd: &GD<'src>, context: &mut Context<'ast, 'src>) {
 #[cfg(test)]
 mod tests {
 
-    use crate::{
-        compiler::{
-            parse_domain, parse_problem,
-            tests::{TINY_DOMAIN_SRC, TINY_PROBLEM_SRC, TINY_SOURCES},
-        },
-        ReportPrinter,
-    };
-
-    use super::first_pass;
-
-    #[test]
-    fn test_unset_predicates() {
-        let domain = parse_domain(TINY_DOMAIN_SRC).unwrap_or_print_report(&TINY_SOURCES);
-        let problem = parse_problem(TINY_PROBLEM_SRC, domain.requirements)
-            .unwrap_or_print_report(&TINY_SOURCES);
-        let data = first_pass(&domain, &problem).unwrap_or_print_report(&TINY_SOURCES);
-        assert_eq!(data.const_false_predicates.len(), 0);
-        assert_eq!(data.const_true_predicates.len(), 1);
-    }
 }

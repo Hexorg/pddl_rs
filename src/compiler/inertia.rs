@@ -1,4 +1,4 @@
-use std::{collections::HashSet, hash::Hash};
+use std::{collections::HashSet, hash::Hash, fmt::Display};
 
 /// Following the Koehler, Jana, and Jörg Hoffmann. "On the Instantiation of ADL Operators Involving Arbitrary First-Order Formulas." PuK. 2000. [paper](https://www.researchgate.net/profile/Jana-Koehler-2/publication/220916196_On_the_Instantiation_of_ADL_Operators_Involving_Arbitrary_First-Order_Formulas/links/53f5c12c0cf2fceacc6f65e0/On-the-Instantiation-of-ADL-Operators-Involving-Arbitrary-First-Order-Formulas.pdf),
 /// Inertia allows us to start pruning unused states, actions, and instatiate basic action-graphs allowing us to skip many dead-end states.
@@ -23,6 +23,23 @@ where
             provides_negative: HashSet::new(),
             provides_positive: HashSet::new(),
         }
+    }
+}
+impl<O> Display for Inertia<O> where O:Display+Eq+PartialEq+std::hash::Hash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.wants_negative.len() > 0 {
+            f.write_fmt(format_args!("\tWants negative: {}\n", self.wants_negative.iter().map(|f| format!("{}", f)).collect::<Vec<_>>().join(", ")))?;
+        }
+        if self.wants_positive.len() > 0 {
+            f.write_fmt(format_args!("\tWants positive: {}\n", self.wants_positive.iter().map(|f| format!("{}", f)).collect::<Vec<_>>().join(", ")))?;
+        }
+        if self.provides_negative.len() > 0 {
+            f.write_fmt(format_args!("\tProvides negative: {}\n", self.provides_negative.iter().map(|f| format!("{}", f)).collect::<Vec<_>>().join(", ")))?;
+        }
+        if self.provides_positive.len() > 0 {
+            f.write_fmt(format_args!("\tProvides positive: {}\n", self.provides_positive.iter().map(|f| format!("{}", f)).collect::<Vec<_>>().join(", ")))?;
+        }
+        Ok(())
     }
 }
 
@@ -66,26 +83,5 @@ where
 #[cfg(test)]
 mod test {
 
-    use crate::{
-        compiler::{final_pass::final_pass, first_pass::first_pass, parse_domain, parse_problem},
-        lib_tests::load_repo_pddl,
-        ReportPrinter, Requirement,
-    };
-
-    #[test]
-    fn test_inertia() {
-        let domain_filename = "sample_problems/simple_domain.pddl";
-        let problem_filename = "sample_problems/simple_problem.pddl";
-        let sources = load_repo_pddl(domain_filename, problem_filename);
-        let domain = parse_domain(&sources.domain_src).unwrap_or_print_report(&sources);
-        let problem = parse_problem(&sources.problem_src, Requirement::Typing.into())
-            .unwrap_or_print_report(&sources);
-        let data = first_pass(&domain, &problem).unwrap_or_print_report(&sources);
-        let c_problem = final_pass(data, &domain, &problem).unwrap_or_print_report(&sources);
-        println!(
-            "Compiled problem uses {} bits of memory and has {} actions.",
-            c_problem.memory_size,
-            c_problem.actions.len()
-        );
-    }
+    
 }
