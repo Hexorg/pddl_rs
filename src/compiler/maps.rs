@@ -1,20 +1,18 @@
 use std::{
     collections::{HashMap, HashSet},
-    num::NonZeroI8,
-    ops::Range,
 };
 
 use enumset::EnumSet;
 
 use super::{
-    action_graph::ActionGraph, for_all_type_object_permutations, AtomicFSkeleton, AtomicFormula,
-    Domain, List, Name, NegativeFormula, Objects, PredicateUsize, Problem, span::Span, StateUsize, Type, inertia::Inertia,
+    AtomicFormula,
+    Domain, List, Name, PredicateUsize, Problem, span::Span, Type, CompiledAction, CompiledActionUsize,
 };
 use crate::{Error, ErrorKind, Requirement};
 
 /// Logical structures for compiling PDDL problems.
 #[derive(Debug, PartialEq)]
-pub struct DomainData<'src> {
+pub struct Maps<'src> {
     /// Domain and problem requirements
     pub requirements: EnumSet<Requirement>,
     /// Type inheritance tree. Everything should end up being an object.
@@ -28,24 +26,11 @@ pub struct DomainData<'src> {
     pub type_to_objects_map: HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
     /// Source code position mapping of where problem objects are declared.
     pub object_src_pos: HashMap<&'src str, Span>,
-    /// Mapping a vector of `[predicate, arg1, arg2, .., argN]` to a memory bit offset.
-    pub predicate_memory_map: HashMap<AtomicFormula<'src, Name<'src>>, StateUsize>,
-    // Optimization structures:
-    /// Each offset in this vector matches the offset of action list vector.
-    pub action_graph: ActionGraph,
-    /// All Readable and Writable typed predicates used in the domain ordered by action
-    pub action_inertia: Vec<Inertia<AtomicFormula<'src, Type<'src>>>>,
-    /// Set of all predicate names that have been identified as constant
-    // pub constant_predicates: HashSet<Name<'src>>,
-    /// Set of all concrete atomic formulas that have been identified to stay true
-    /// no matter what actions have been executed
-    pub const_true_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
-    /// Set of all concrete atomic formulas that have been identified to stay false
-    /// no matter what actions have been executed
-    pub const_false_predicates: HashSet<AtomicFormula<'src, Name<'src>>>,
-    // /// A map of AST Actions to Compiled action ranges. The range represents
-    // /// All possible calls of a given action (for permutated objects)
-    // pub compiled_action_ranges: Vec<Range<usize>>,
+    /// Mapping a memory bit offset to predicate representing it. Used in `Vec<`[`Instruction`]`>::decomp()`
+    pub memory_map: Vec<AtomicFormula<'src, Name<'src>>>,
+    // /// Mapping of argument vectors to compiled actions that use them
+    // pub args_map: Vec<HashMap<Name<'src>, (PredicateUsize, PredicateUsize)>>,
+
 }
 
 /// Perform basic sanity checks like if the problem's domain match domain name
@@ -71,7 +56,7 @@ pub fn validate_problem<'src>(domain: &Domain<'src>, problem: &Problem<'src>) ->
 pub fn map_objects<'src>(
     domain: &Domain<'src>,
     problem: &'src Problem<'src>,
-) -> Result<DomainData<'src>, Error> {
+) -> Result<Maps<'src>, Error> {
     let requirements = domain.requirements | problem.requirements;
     let mut type_tree = HashMap::new();
     let mut type_src_pos = HashMap::new();
@@ -130,18 +115,15 @@ pub fn map_objects<'src>(
             Type::Either(_) => todo!(),
         }
     }
-    Ok(DomainData {
+    Ok(Maps {
         requirements,
         type_tree,
         type_src_pos,
         object_to_type_map,
         type_to_objects_map,
         object_src_pos,
-        predicate_memory_map: HashMap::new(),
-        action_inertia: Vec::new(),
-        action_graph: ActionGraph::new(),
-        const_false_predicates: HashSet::new(),
-        const_true_predicates: HashSet::new(),
+        memory_map: Vec::new(),
+        // args_map: Vec::new(),
     })
 }
 

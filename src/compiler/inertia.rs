@@ -1,4 +1,7 @@
-use std::{collections::HashSet, hash::Hash, fmt::Display};
+
+use std::{collections::{HashSet, HashMap}, hash::Hash, fmt::Display};
+
+use super::{AtomicFormula, Term, PredicateUsize, Problem, Name, CompiledAction, Domain, BasicAction, List, maps::Maps};
 
 /// Following the Koehler, Jana, and Jörg Hoffmann. "On the Instantiation of ADL Operators Involving Arbitrary First-Order Formulas." PuK. 2000. [paper](https://www.researchgate.net/profile/Jana-Koehler-2/publication/220916196_On_the_Instantiation_of_ADL_Operators_Involving_Arbitrary_First-Order_Formulas/links/53f5c12c0cf2fceacc6f65e0/On-the-Instantiation-of-ADL-Operators-Involving-Arbitrary-First-Order-Formulas.pdf),
 /// Inertia allows us to start pruning unused states, actions, and instatiate basic action-graphs allowing us to skip many dead-end states.
@@ -25,6 +28,8 @@ where
         }
     }
 }
+
+
 impl<O> Display for Inertia<O> where O:Display+Eq+PartialEq+std::hash::Hash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.wants_negative.len() > 0 {
@@ -43,17 +48,25 @@ impl<O> Display for Inertia<O> where O:Display+Eq+PartialEq+std::hash::Hash {
     }
 }
 
+impl<'src> Inertia<AtomicFormula<'src, Term<'src>>> {
+    pub fn concrete(&self, problem:&Problem<'src>, args:&[(Name<'src>, (PredicateUsize, PredicateUsize))]) -> Inertia<AtomicFormula<'src, Name<'src>>>{
+        let wants_positive = self.wants_positive.iter().map(|f| f.concrete(problem, args)).collect();
+        let wants_negative = self.wants_negative.iter().map(|f| f.concrete(problem, args)).collect();
+        let provides_positive = self.provides_positive.iter().map(|f| f.concrete(problem, args)).collect();
+        let provides_negative = self.provides_negative.iter().map(|f| f.concrete(problem, args)).collect();
+        Inertia { wants_negative, wants_positive, provides_negative, provides_positive }
+    }
+}
+
 pub trait DomainInertia {
-    /// Check if action `from` enables any state that action `to` requires
+    /// Check if action `from` enables any predicate that action `to` requires
     fn is_enables(&self, from: usize, to: usize) -> bool;
-    /// Check if action `from` disables any state that action `to` requires
+    /// Check if action `from` disables any predicate that action `to` requires
     fn is_disables(&self, from: usize, to: usize) -> bool;
 }
 
-impl<O> DomainInertia for Vec<Inertia<O>>
-where
-    O: Eq + Hash,
-{
+impl<'src, O> DomainInertia for Vec<Inertia<O>>
+where O:Eq+PartialEq+std::hash::Hash{
     fn is_enables(&self, from: usize, to: usize) -> bool {
         self[from]
             .provides_positive
@@ -78,6 +91,7 @@ where
                 .count()
                 > 0
     }
+
 }
 
 #[cfg(test)]

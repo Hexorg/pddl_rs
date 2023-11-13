@@ -128,6 +128,12 @@ impl<'src> nom::error::ParseError<parser::Input<'src>> for Error {
     }
 }
 
+impl From<Error> for Vec<Error> {
+    fn from(value: Error) -> Self {
+        vec![value]
+    }
+}
+
 pub struct Sources {
     pub domain_path: PathBuf,
     pub problem_path: PathBuf,
@@ -185,17 +191,19 @@ pub trait ReportPrinter<O> {
     fn unwrap_or_print_report(self, sources: &Sources) -> O;
 }
 
-impl<'src, O> ReportPrinter<O> for Result<O, Error> {
+impl<'src, O> ReportPrinter<O> for Result<O, Vec<Error>> {
     fn unwrap_or_print_report(self, sources: &Sources) -> O {
         match self {
-            Err(e) => {
-                let filename = match e.span.is_problem {
-                    true => &sources.problem_path,
-                    false => &sources.domain_path,
-                };
-                e.report(filename.to_str().unwrap())
+            Err(vec) => {
+                for e in vec {
+                    let filename = match e.span.is_problem {
+                        true => &sources.problem_path,
+                        false => &sources.domain_path,
+                    };
+                    e.report(filename.to_str().unwrap())
                     .eprint(sources)
                     .unwrap();
+                }
                 panic!()
             }
             Ok(cd) => cd,

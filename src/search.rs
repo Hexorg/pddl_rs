@@ -4,10 +4,10 @@ use std::{
     hash::Hash,
 };
 pub mod routing;
-use crate::compiler::{
+use crate::{compiler::{
     CompiledAction, CompiledActionUsize, CompiledProblem, Instruction, IntValue, Runnable,
-    StateUsize,
-};
+    StateUsize, Domain, Problem,
+}, Objects};
 
 #[derive(Clone)]
 pub struct SolutionNode {
@@ -105,6 +105,8 @@ impl AstarInternals {
 
 pub fn a_star(
     problem: &CompiledProblem,
+    domain: Option<&Domain>,
+    past: Option<&Problem>,
     args: &mut AstarInternals,
 ) -> Option<Vec<CompiledActionUsize>> {
     fn _test_action(
@@ -114,7 +116,9 @@ pub fn a_star(
         cheapest_path_to_map: &HashMap<Vec<bool>, i64>,
         goal: &[Instruction],
     ) -> Option<SolutionNode> {
+        // print!("Checking: {}", action.precondition.disasm());
         if action.precondition.run(&current.state, &current.functions) {
+            // println!("Can run!");
             let mut new_node = SolutionNode {
                 action_id: Some(action_idx),
                 cost: current.cost,
@@ -130,6 +134,12 @@ pub fn a_star(
             new_node.cost = new_node.functions[0];
             let wrong_states = goal.state_miss_count(&new_node.state);
             new_node.estimate = new_node.cost + wrong_states;
+            if let Instruction::ReadState(n) = goal[5] {
+                // println!("Goal: {}", goal.disasm());
+                if new_node.state[n as usize] && wrong_states != 0 {
+                    new_node.estimate += wrong_states;
+                }
+            }
             if new_node.estimate
                 < *cheapest_path_to_map
                     .get(&new_node.state)
@@ -140,14 +150,18 @@ pub fn a_star(
                 None
             }
         } else {
+            // println!("Cannot run.");
             None
         }
     }
     let mut iterations = 0;
+    let mut smallest_missed_problem_states = IntValue::MAX;
     if args.open_set.is_empty() {
         let mut start = SolutionNode::new(problem.memory_size);
+        // println!("Init: {}", problem.init.disasm());
         problem.init.run_mut(&mut start.state, &mut start.functions);
         start.estimate = problem.goal.state_miss_count(&start.state);
+        smallest_missed_problem_states = start.estimate;
         args.cheapest_path_to_map
             .insert(start.state.clone(), start.estimate);
         args.open_set.push(start.clone());
@@ -165,24 +179,53 @@ pub fn a_star(
             path.reverse();
             return Some(path);
         }
+        if current.estimate - current.cost < smallest_missed_problem_states {
+            println!("Achieved required goal state! Node cost:{} estimate: {}", current.cost, current.estimate);
+            let mut tmp = current.clone();
+            while let Some(next) = args.came_from.get(&tmp) {
+                let action_id = tmp.action_id.unwrap() as usize;
+                let domain_action_id = problem.actions[action_id].domain_action_idx as usize;
+                let args = problem.actions[action_id].args.iter().map(|(row,  col)| past.unwrap().objects.get_object_name(*row, *col).1).collect::<Vec<_>>();
+                print!("{}({}), ", domain.unwrap().actions[domain_action_id].name(), args.join(","));
+                tmp = next.clone();
+            }
+            println!("flushing states.");
+            args.open_set.clear();
+            smallest_missed_problem_states = current.estimate - current.cost;
+
+        }
+
+        let max_iterations = if let Some(last) = current.action_id {
+            problem.action_graph.priority[last as usize].len()
+        } else {
+            problem.actions.len()
+        } as CompiledActionUsize;
 
         let mut upper_bound = current.visited_neighbor_idx
             + (if current.action_id.is_some() {
-                10
+                // Reached new depth of cost 1, open_set has 0 states
+                // Reached new depth of cost 2, open_set has 15 states
+                // Reached new depth of cost 11, open_set has 27 states
+                // Achieved required goal state! Node cost:11 estimate: 16
+                // fill-shot, grasp, flushing states.
+                // Reached new depth of cost 12, open_set has 0 states
+                // Reached new depth of cost 13, open_set has 9 states
+                // Reached new depth of cost 22, open_set has 29 states
+                // Reached new depth of cost 23, open_set has 37 states
+                // Reached new depth of cost 24, open_set has 201 states
+                // Reached new depth of cost 25, open_set has 487 states
+                // Reached new depth of cost 33, open_set has 1621 states
+                // Reached new depth of cost 34, open_set has 2052 states
+                // Reached new depth of cost 35, open_set has 5687 states
+                // Reached new depth of cost 36, open_set has 20711 states
+                3
             } else {
-                problem.actions.len() as CompiledActionUsize
+                max_iterations
             });
-        if upper_bound > problem.actions.len() as CompiledActionUsize {
-            upper_bound = problem.actions.len() as CompiledActionUsize;
+        if upper_bound > max_iterations {
+            upper_bound = max_iterations;
         }
-        if current.action_id.is_some()
-            && upper_bound
-                > problem.action_graph.priority[current.action_id.unwrap() as usize].len()
-                    as CompiledActionUsize
-        {
-            upper_bound = problem.action_graph.priority[current.action_id.unwrap() as usize].len()
-                as CompiledActionUsize;
-        }
+
         for neighbor_idx in current.visited_neighbor_idx..upper_bound {
             iterations += 1;
             let i = if current.action_id.is_some() {
@@ -214,7 +257,7 @@ pub fn a_star(
             }
         }
         current.visited_neighbor_idx = upper_bound;
-        if upper_bound != problem.actions.len() as CompiledActionUsize {
+        if upper_bound != max_iterations {
             args.open_set.push(current)
         } else {
             // println!(
@@ -270,12 +313,25 @@ mod test {
             },
         };
         let mut args = AstarInternals::new();
-        assert_eq!(a_star(&p, &mut args), Some(vec![0]))
+        assert_eq!(a_star(&p, None, None, &mut args), Some(vec![0]))
     }
 
     #[test]
-    #[ignore = "takes too long without optimizations"]
+    // #[ignore = "Takes too long without optimizations; Reached cost 42 before running out of ram"]
+    // #[ignore = "Takes too long without optimizations; Reached cost 47 in 60 seconds!"]
     fn barman_pddl_search() -> std::io::Result<()> {
+        // was able to figure out how to make one cocktail in ~2 minutes
+        // pour-shaker-to-shot(cocktail3,shot1,left,shaker1,l2,l1), shake(cocktail3,ingredient7,ingredient5,shaker1,left,right), grasp(left,shaker1), leave(left,shot2), pour-shot-to-used-shaker(shot2,ingredient5,shaker1,left,l1,l2), fill-shot(shot2,ingredient5,left,right,dispenser5), clean-shot(shot2,ingredient7,left,right), pour-shot-to-clean-shaker(shot2,ingredient7,shaker1,left,l0,l1), fill-shot(shot2,ingredient7,left,right,dispenser7), grasp(left,shot2), flushing states.
+        // grasp(left,shot5)
+        // fill-shot(shot5,ingredient7,left,right,dispenser7), 
+        // pour-shot-to-clean-shaker(shot5,ingredient7,shaker1,left,l0,l1), 
+        // clean-shot(shot5,ingredient7,left,right), 
+        // fill-shot(shot5,ingredient5,left,right,dispenser5), 
+        // pour-shot-to-used-shaker(shot5,ingredient5,shaker1,left,l1,l2), 
+        // leave(left,shot5), 
+        // grasp(left,shaker1), 
+        // shake(cocktail3,ingredient7,ingredient5,shaker1,left,right), 
+        // pour-shaker-to-shot(cocktail3,shot1,left,shaker1,l2,l1), 
         let solution = full_search(
             "sample_problems/barman/domain.pddl",
             "sample_problems/barman/problem_5_10_7.pddl",
@@ -326,7 +382,7 @@ mod test {
                     action
                         .args
                         .iter()
-                        .map(|(row, col)| problem.objects.get_object(*row, *col).item.1)
+                        .map(|(row, col)| problem.objects.get_object_name(*row, *col).1)
                         .collect::<Vec<&str>>()
                         .join(","),
                     action.precondition.disasm(),
@@ -343,7 +399,7 @@ mod test {
             println!("Action graph:\n{}", c_problem.action_graph);
         }
         let mut args = AstarInternals::new();
-        let solution = a_star(&c_problem, &mut args).unwrap();
+        let solution = a_star(&c_problem, Some(&domain), Some(&problem), &mut args).unwrap();
         let end = SystemTime::now();
         let duration = end.duration_since(start).unwrap();
         println!("Time taken: {}", duration.as_secs_f32());
@@ -359,7 +415,7 @@ mod test {
                 action
                     .args
                     .iter()
-                    .map(|(row, col)| problem.objects.get_object(*row, *col).item.1)
+                    .map(|(row, col)| problem.objects.get_object_name(*row, *col).1)
                     .collect::<Vec<&str>>()
             );
         }

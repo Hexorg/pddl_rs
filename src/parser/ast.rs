@@ -14,21 +14,18 @@ use enumset::{EnumSet, EnumSetType};
 use crate::{compiler::PredicateUsize, ErrorKind};
 
 
-pub struct TypedItem<'src> {
-    pub item: Name<'src>,
-    pub kind: &'src Type<'src>,
-}
 
-pub trait Objects {
-    fn get_object(&self, row: PredicateUsize, col: PredicateUsize) -> TypedItem;
+pub trait Objects<'src> {
+    fn get_object_name(&self, row: PredicateUsize, col: PredicateUsize) -> Name<'src>;
+    fn get_object_type(&self, row: PredicateUsize) -> &Type<'src>;
 }
-impl<'src> Objects for Vec<List<'src>> {
-    fn get_object(&self, row: PredicateUsize, col: PredicateUsize) -> TypedItem {
-        let List { items, kind } = &self[row as usize];
-        TypedItem {
-            item: items[col as usize],
-            kind,
-        }
+impl<'src> Objects<'src> for Vec<List<'src>> {
+    fn get_object_name(&self, row: PredicateUsize, col: PredicateUsize) -> Name<'src> {
+        let name = self[row as usize].items[col as usize];
+        name
+    }
+    fn get_object_type(&self, row: PredicateUsize) -> &Type<'src> {
+        &self[row as usize].kind
     }
 }
 
@@ -607,6 +604,7 @@ impl<'src> TryInto<AtomicFormula<'src, Name<'src>>> for &AtomicFormula<'src, Ter
         }
     }
 }
+
 impl<'src> AtomicFormula<'src, Term<'src>> {
     pub fn generalized_to_type(
         &self,
@@ -631,35 +629,50 @@ impl<'src> AtomicFormula<'src, Term<'src>> {
             AtomicFormula::Equality(_, _) => todo!(),
         }
     }
-    pub fn concrete<'a>(
+    pub fn concrete(
         &self,
-        problem: &'a Problem<'src>,
+        problem: &Problem<'src>,
         args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
     ) -> AtomicFormula<'src, Name<'src>>
-    where
-        'a: 'src,
     {
+        match self {
+            AtomicFormula::Predicate(predicate, variables) => {
+                let mut name_vec:Vec<Name<'src>> = Vec::new();
+                for variable in variables {
+                    match variable {
+                        Term::Name(name) => name_vec.push(*name),
+                        Term::Variable(var) => {
+                            for (from, to) in args {
+                                if from == var {
+                                    name_vec.push(problem.objects.get_object_name(to.0, to.1));
+                                    break;
+                                }
+                            }
+                        },
+                        Term::Function(_) => todo!(),
+                    }
+                }
+                AtomicFormula::Predicate(predicate.clone(), name_vec)
+            }
+            AtomicFormula::Equality(_, _) => todo!(),
+        }
+    }
+    pub fn concrete_from_map(&self, problem:&Problem<'src>, map:&HashMap<Name<'src>, (PredicateUsize, PredicateUsize)>) -> AtomicFormula<'src, Name<'src>> {
         match self {
             AtomicFormula::Predicate(predicate, variables) => {
                 let mut name_vec = Vec::new();
                 for variable in variables {
                     name_vec.push(match variable {
-                        Term::Name(name) => name.clone(),
-                        Term::Variable(var) => args
-                            .iter()
-                            .find_map(|(from, to)| {
-                                if from == var {
-                                    Some(problem.objects.get_object(to.0, to.1).item)
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap(),
+                        Term::Name(name) => *name,
+                        Term::Variable(var) => {
+                            let (row, col) = map.get(var).unwrap();
+                            problem.objects.get_object_name(*row, *col)
+                        },
                         Term::Function(_) => todo!(),
                     });
                 }
                 AtomicFormula::Predicate(predicate.clone(), name_vec)
-            }
+            },
             AtomicFormula::Equality(_, _) => todo!(),
         }
     }
@@ -689,11 +702,38 @@ impl<'src> SpannedAst for FunctionTerm<'src> {
 }
 
 /// A name, variable, or function
-#[derive(PartialEq, Hash, Eq, Clone)]
+#[derive(Clone, Eq)]
 pub enum Term<'src> {
     Name(Name<'src>),
     Variable(Name<'src>),
     Function(FunctionTerm<'src>), // :object-fluents
+}
+impl<'src> std::hash::Hash for Term<'src> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Term::Name(n) => n.hash(state),
+            Term::Variable(_) => state.write_u8(1),
+            Term::Function(f) => f.hash(state),
+        }
+    }
+}
+impl<'src> PartialEq for Term<'src> {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            Term::Name(l) => match other {
+                Term::Name(r) => l.eq(r),
+                _ => false
+            },
+            Term::Variable(_) => match other {
+                Term::Variable(_) => true,
+                _ => false,
+            },
+            Term::Function(l) => match other {
+                Term::Function(r) => l.eq(r),
+                _ => false
+            },
+        }
+    }
 }
 impl<'src> Debug for Term<'src> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -717,5 +757,32 @@ impl<'src> SpannedAst for Term<'src> {
             Self::Variable(v) => v.0,
             Self::Function(f) => f.span(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[derive(Copy, Clone)]
+    struct Name<'src> {
+        name:&'src str
+    }
+
+    struct Problem<'src> {
+        names: Vec<Vec<Name<'src>>>,
+    }
+
+    trait Objects<'src> {
+        fn get_object(&self, row:usize, col:usize) -> Name<'src>;
+    }
+
+    impl<'src> Objects<'src> for Vec<Vec<Name<'src>>> {
+        fn get_object(&self,row:usize, col:usize) -> Name<'src> {
+            self[row][col]
+        }
+    }
+
+    fn get_name<'src>(problem:&Problem<'src>, row:usize, col:usize) -> Name<'src> {
+        problem.names.get_object(row, col)
+        // problem.names[row][col]
     }
 }

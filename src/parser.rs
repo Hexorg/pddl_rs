@@ -224,7 +224,7 @@ fn pddl_anyletter(input: Input) -> IResult<Input> {
 ///     constraints:None,
 ///     actions:vec![]}))
 /// ```
-pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Error> {
+pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Vec<Error>> {
     let input = Input {
         // filename,
         src,
@@ -267,7 +267,7 @@ pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Error> {
     )(input)
     {
         Ok((_, domain)) => Ok(domain),
-        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(e),
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![e]),
         _ => panic!(),
     }
 }
@@ -915,7 +915,7 @@ fn timed_effect(input: Input) -> IResult<TimedEffect> {
 pub fn parse_problem<'src>(
     src: &'src str,
     requirements: EnumSet<Requirement>,
-) -> Result<Problem<'src>, Error> {
+) -> Result<Problem<'src>, Vec<Error>> {
     let input = Input {
         is_problem: true,
         src,
@@ -964,7 +964,7 @@ pub fn parse_problem<'src>(
     )(input)
     {
         Ok((_, problem)) => Ok(problem),
-        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(e),
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![e]),
         _ => panic!(),
     }
 }
