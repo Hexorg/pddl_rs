@@ -3,10 +3,13 @@ use std::{
     fmt::Debug,
     hash::Hash,
 };
-pub mod routing;
-use crate::compiler::{
-    CompiledAction, CompiledActionUsize, CompiledProblem, Instruction, IntValue, Runnable,
-    StateUsize,
+
+use crate::{
+    compiler::{
+        action_graph::ActionGraph, CompiledAction, CompiledActionUsize, CompiledProblem, Domain,
+        Instruction, IntValue, Problem, Runnable, StateUsize,
+    },
+    Objects,
 };
 
 #[derive(Clone)]
@@ -88,33 +91,39 @@ impl SolutionNode {
     }
 }
 
-pub struct AstarInternals {
+pub struct AstarInternals<'src> {
     open_set: BinaryHeap<SolutionNode>,
     came_from: HashMap<SolutionNode, SolutionNode>,
     cheapest_path_to_map: HashMap<Vec<bool>, i64>,
+    dynamic_action_graph: ActionGraph<'src>,
 }
-impl AstarInternals {
-    pub fn new() -> Self {
+impl<'src> AstarInternals<'src> {
+    pub fn new(action_graph: &ActionGraph<'src>) -> Self {
         Self {
             open_set: BinaryHeap::new(),
             came_from: HashMap::new(),
             cheapest_path_to_map: HashMap::new(),
+            dynamic_action_graph: action_graph.clone(),
         }
     }
 }
 
 pub fn a_star(
     problem: &CompiledProblem,
+    domain: Option<&Domain>,
+    past: Option<&Problem>,
     args: &mut AstarInternals,
 ) -> Option<Vec<CompiledActionUsize>> {
     fn _test_action(
         action_idx: CompiledActionUsize,
         action: &CompiledAction,
         current: &SolutionNode,
-        cheapest_path_to_map: &HashMap<Vec<bool>, i64>,
         goal: &[Instruction],
+        args: &mut AstarInternals,
     ) -> Option<SolutionNode> {
+        // print!("Checking: {}", action.precondition.disasm());
         if action.precondition.run(&current.state, &current.functions) {
+            // println!("Can run!");
             let mut new_node = SolutionNode {
                 action_id: Some(action_idx),
                 cost: current.cost,
@@ -130,24 +139,51 @@ pub fn a_star(
             new_node.cost = new_node.functions[0];
             let wrong_states = goal.state_miss_count(&new_node.state);
             new_node.estimate = new_node.cost + wrong_states;
+            if goal.len() > 5 {
+                // TODO Generalize problem subdivision
+                if let Instruction::ReadState(n) = goal[5] {
+                    // println!("Goal: {}", goal.disasm());
+                    if new_node.state[n as usize] && wrong_states != 0 {
+                        new_node.estimate += wrong_states;
+                    }
+                }
+            }
             if new_node.estimate
-                < *cheapest_path_to_map
+                < *args
+                    .cheapest_path_to_map
                     .get(&new_node.state)
                     .unwrap_or(&i64::MAX)
             {
                 Some(new_node)
             } else {
+                // We reached a state we already saw before
+                let mut path = Vec::new();
+                let mut current = new_node;
+                path.push(current.action_id.unwrap());
+                while let Some(next) = args.came_from.get(&current) {
+                    next.action_id.and_then(|p| Some(path.push(p)));
+                    current = next.clone();
+                }
+                if path.len() >= 2 {
+                    path.reverse();
+                    println!("Decreasing path priority.");
+                    args.dynamic_action_graph.add_low_priority_path(path);
+                }
                 None
             }
         } else {
+            // println!("Cannot run.");
             None
         }
     }
     let mut iterations = 0;
+    let mut smallest_missed_problem_states = IntValue::MAX;
     if args.open_set.is_empty() {
         let mut start = SolutionNode::new(problem.memory_size);
+        // println!("Init: {}", problem.init.disasm());
         problem.init.run_mut(&mut start.state, &mut start.functions);
         start.estimate = problem.goal.state_miss_count(&start.state);
+        smallest_missed_problem_states = start.estimate;
         args.cheapest_path_to_map
             .insert(start.state.clone(), start.estimate);
         args.open_set.push(start.clone());
@@ -156,7 +192,7 @@ pub fn a_star(
     while let Some(mut current) = args.open_set.pop() {
         if problem.goal.run(&current.state, &current.functions) {
             println!("Solved in {} iterations", iterations);
-            let mut path = Vec::with_capacity(args.came_from.len());
+            let mut path = Vec::new();
             path.push(current.action_id.unwrap());
             while let Some(next) = args.came_from.get(&current) {
                 next.action_id.and_then(|p| Some(path.push(p)));
@@ -165,40 +201,69 @@ pub fn a_star(
             path.reverse();
             return Some(path);
         }
+        if current.estimate - current.cost < smallest_missed_problem_states {
+            println!(
+                "Achieved required goal state in {} iterations. Node cost:{} estimate: {}",
+                iterations, current.cost, current.estimate
+            );
+            let mut path = vec![current.action_id.unwrap()];
+            let mut tmp = current.clone();
+            while let Some(next) = args.came_from.get(&tmp) {
+                let action_id = tmp.action_id.unwrap();
+                path.push(action_id);
+                let action_id = action_id as usize;
+                let domain_action_id = problem.actions[action_id].domain_action_idx as usize;
+                let args = problem.actions[action_id]
+                    .args
+                    .iter()
+                    .map(|(row, col)| past.unwrap().objects.get_object_name(*row, *col).1)
+                    .collect::<Vec<_>>();
+                print!(
+                    "{}({}), ",
+                    domain.unwrap().actions[domain_action_id].name(),
+                    args.join(",")
+                );
+                tmp = next.clone();
+            }
+            path.reverse();
+            println!("\nFlushing states.");
+            args.open_set.clear();
+            args.dynamic_action_graph.add_high_priority_path(
+                problem,
+                past.unwrap(),
+                domain.unwrap(),
+                path,
+            );
+            println!("Increasing path priority.");
+            smallest_missed_problem_states = current.estimate - current.cost;
+        }
+
+        let max_iterations = if let Some(last) = current.action_id {
+            args.dynamic_action_graph.priority[last as usize].len()
+        } else {
+            problem.actions.len()
+        } as CompiledActionUsize;
 
         let mut upper_bound = current.visited_neighbor_idx
             + (if current.action_id.is_some() {
-                10
+                3
             } else {
-                problem.actions.len() as CompiledActionUsize
+                max_iterations
             });
-        if upper_bound > problem.actions.len() as CompiledActionUsize {
-            upper_bound = problem.actions.len() as CompiledActionUsize;
+        if upper_bound > max_iterations {
+            upper_bound = max_iterations;
         }
-        if current.action_id.is_some()
-            && upper_bound
-                > problem.action_graph.priority[current.action_id.unwrap() as usize].len()
-                    as CompiledActionUsize
-        {
-            upper_bound = problem.action_graph.priority[current.action_id.unwrap() as usize].len()
-                as CompiledActionUsize;
-        }
+
         for neighbor_idx in current.visited_neighbor_idx..upper_bound {
             iterations += 1;
             let i = if current.action_id.is_some() {
-                problem.action_graph.priority[current.action_id.unwrap() as usize]
+                args.dynamic_action_graph.priority[current.action_id.unwrap() as usize]
                     [neighbor_idx as usize]
             } else {
                 neighbor_idx as CompiledActionUsize
             };
             let action = &problem.actions[i as usize];
-            if let Some(new_node) = _test_action(
-                i,
-                action,
-                &current,
-                &args.cheapest_path_to_map,
-                &problem.goal,
-            ) {
+            if let Some(new_node) = _test_action(i, action, &current, &problem.goal, args) {
                 if new_node.cost > largest_cost {
                     largest_cost = new_node.cost;
                     println!(
@@ -214,7 +279,7 @@ pub fn a_star(
             }
         }
         current.visited_neighbor_idx = upper_bound;
-        if upper_bound != problem.actions.len() as CompiledActionUsize {
+        if upper_bound != max_iterations {
             args.open_set.push(current)
         } else {
             // println!(
@@ -249,6 +314,7 @@ mod test {
         let p = CompiledProblem {
             memory_size: 1,
             constants_size: 0,
+            domain_action_ranges: Vec::new(),
             actions: vec![
                 CompiledAction {
                     domain_action_idx: 0,
@@ -267,15 +333,28 @@ mod test {
             goal: vec![ReadState(0)],
             action_graph: ActionGraph {
                 priority: vec![vec![], vec![]],
+                variable_inertia: Vec::new(),
             },
         };
-        let mut args = AstarInternals::new();
-        assert_eq!(a_star(&p, &mut args), Some(vec![0]))
+        let mut args = AstarInternals::new(&p.action_graph);
+        assert_eq!(a_star(&p, None, None, &mut args), Some(vec![0]))
     }
 
     #[test]
-    #[ignore = "takes too long without optimizations"]
+    // #[ignore = "Takes too long without optimizations; Reached cost 42 before running out of ram"]
+    #[ignore = "Takes too long without optimizations; Reached cost 61 in 10 Minutes and found first drink!"]
     fn barman_pddl_search() -> std::io::Result<()> {
+        // was able to figure out how to make one cocktail in ~2 minutes
+        // grasp(left,shot5)
+        // fill-shot(shot5,ingredient7,left,right,dispenser7),
+        // pour-shot-to-clean-shaker(shot5,ingredient7,shaker1,left,l0,l1),
+        // clean-shot(shot5,ingredient7,left,right),
+        // fill-shot(shot5,ingredient5,left,right,dispenser5),
+        // pour-shot-to-used-shaker(shot5,ingredient5,shaker1,left,l1,l2),
+        // leave(left,shot5),
+        // grasp(left,shaker1),
+        // shake(cocktail3,ingredient7,ingredient5,shaker1,left,right),
+        // pour-shaker-to-shot(cocktail3,shot1,left,shaker1,l2,l1),
         let solution = full_search(
             "sample_problems/barman/domain.pddl",
             "sample_problems/barman/problem_5_10_7.pddl",
@@ -326,7 +405,7 @@ mod test {
                     action
                         .args
                         .iter()
-                        .map(|(row, col)| problem.objects.get_object(*row, *col).item.1)
+                        .map(|(row, col)| problem.objects.get_object_name(*row, *col).1)
                         .collect::<Vec<&str>>()
                         .join(","),
                     action.precondition.disasm(),
@@ -342,8 +421,8 @@ mod test {
         if c_problem.actions.len() < 100 {
             println!("Action graph:\n{}", c_problem.action_graph);
         }
-        let mut args = AstarInternals::new();
-        let solution = a_star(&c_problem, &mut args).unwrap();
+        let mut args = AstarInternals::new(&c_problem.action_graph);
+        let solution = a_star(&c_problem, Some(&domain), Some(&problem), &mut args).unwrap();
         let end = SystemTime::now();
         let duration = end.duration_since(start).unwrap();
         println!("Time taken: {}", duration.as_secs_f32());
@@ -359,7 +438,7 @@ mod test {
                 action
                     .args
                     .iter()
-                    .map(|(row, col)| problem.objects.get_object(*row, *col).item.1)
+                    .map(|(row, col)| problem.objects.get_object_name(*row, *col).1)
                     .collect::<Vec<&str>>()
             );
         }

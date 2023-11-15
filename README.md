@@ -4,7 +4,7 @@
 
 # pddl_rs
 
-PDDL Parsing library based on [Daniel L. Kovacs' BNF definition](http://pddl4j.imag.fr/repository/wiki/BNF-PDDL-3.1.pdf) BNF Definition of PDDL. Future plans include adding planning algorithms to reflect [PDDL4J library](https://github.com/pellierd/pddl4j)
+PDDL Planner based on [Daniel L. Kovacs' BNF definition](http://pddl4j.imag.fr/repository/wiki/BNF-PDDL-3.1.pdf) BNF Definition of PDDL. Includes basic planning algorithms inspired by [PDDL4J library](https://github.com/pellierd/pddl4j). Can solve simple planning problems.
 
 From PDDL4J's Readme:
 
@@ -21,14 +21,15 @@ use pddl_rs::{Sources, Objects, search::{a_star, AstarInternals}};
 let domain_filename = PathBuf::from("sample_problems/simple_domain.pddl");
 let problem_filename = PathBuf::from("sample_problems/simple_problem.pddl");
 let sources = Sources::load(domain_filename, problem_filename);
-let (domain, problem, c_problem) = sources.compile();
+let (domain, problem) = sources.parse();
+let c_problem = sources.compile(&domain, &problem);
 println!("Compiled problem needs {} bits of memory and uses {} actions.", c_problem.memory_size, c_problem.actions.len());
-let mut args = AstarInternals::new();
-if let Some(solution) = a_star(&c_problem, &mut args) {
+let mut args = AstarInternals::new(&c_problem.action_graph);
+if let Some(solution) = a_star(&c_problem, Some(&domain), Some(&problem), &mut args) {
     println!("Solution is {} actions long.", solution.len());
     for action_id in &solution {
         let action = c_problem.actions.get(*action_id as usize).unwrap();
-        println!("\t{}{:?}", domain.actions[action.domain_action_idx as usize].name(), action.args.iter().map(|(row, col)| problem.objects.get_object(*row,*col).item.1).collect::<Vec<&str>>());
+        println!("\t{}{:?}", domain.actions[action.domain_action_idx as usize].name(), action.args.iter().map(|(row, col)| problem.objects.get_object_name(*row,*col).1).collect::<Vec<&str>>());
 }
 }
 ```

@@ -28,14 +28,15 @@
 //! let domain_filename = PathBuf::from("sample_problems/simple_domain.pddl");
 //! let problem_filename = PathBuf::from("sample_problems/simple_problem.pddl");
 //! let sources = Sources::load(domain_filename, problem_filename);
-//! let (domain, problem, c_problem) = sources.compile();
+//! let (domain, problem) = sources.parse();
+//! let c_problem = sources.compile(&domain, &problem);
 //! println!("Compiled problem needs {} bits of memory and uses {} actions.", c_problem.memory_size, c_problem.actions.len());
-//! let mut args = AstarInternals::new();
-//! if let Some(solution) = a_star(&c_problem, &mut args) {
+//! let mut args = AstarInternals::new(&c_problem.action_graph);
+//! if let Some(solution) = a_star(&c_problem, Some(&domain), Some(&problem), &mut args) {
 //!     println!("Solution is {} actions long.", solution.len());
 //!     for action_id in &solution {
 //!         let action = c_problem.actions.get(*action_id as usize).unwrap();
-//!         println!("\t{}{:?}", domain.actions[action.domain_action_idx as usize].name(), action.args.iter().map(|(row, col)| problem.objects.get_object(*row,*col).item.1).collect::<Vec<&str>>());
+//!         println!("\t{}{:?}", domain.actions[action.domain_action_idx as usize].name(), action.args.iter().map(|(row, col)| problem.objects.get_object_name(*row,*col).1).collect::<Vec<&str>>());
 //! }
 //! }
 //! ```
@@ -51,8 +52,8 @@ use compiler::{compile_problem, parse_domain, parse_problem, CompiledProblem, Do
 // use compiler::{Span, Input};
 /// Used to represent domain requirements.
 pub use enumset::EnumSet;
-use parser::ast::Span;
-pub use parser::ast::{Objects, Requirement};
+use parser::ast::span::Span;
+pub use parser::ast::{span::SpannedAst, Objects, Requirement};
 use std::{ops::Range, path::PathBuf};
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -81,8 +82,9 @@ enum ErrorKind {
     // Compiler Errors
     MissmatchedDomain,
     UndefinedType,
-    UnreadPredicate,
     ExpectedName,
+    UnmetGoal,
+    UnmetPredicate,
 }
 
 /// Parser and Compiler Error that uses Adriane to generate a pretty report and point at the right
@@ -118,8 +120,14 @@ impl<'src> nom::error::ParseError<parser::Input<'src>> for Error {
         Self {
             kind: ErrorKind::Nom(kind),
             chain: Some(Box::new(other)),
-            span: parser::ast::SpannedAst::span(&input),
+            span: SpannedAst::span(&input),
         }
+    }
+}
+
+impl From<Error> for Vec<Error> {
+    fn from(value: Error) -> Self {
+        vec![value]
     }
 }
 
@@ -148,12 +156,22 @@ impl Sources {
         }
     }
 
-    pub fn compile(&self) -> (Domain, Problem, CompiledProblem) {
+    pub fn parse(&self) -> (Domain, Problem) {
         let domain = parse_domain(&self.domain_src).unwrap_or_print_report(self);
         let problem =
             parse_problem(&self.problem_src, domain.requirements).unwrap_or_print_report(self);
-        let c_problem = compile_problem(&domain, &problem).unwrap_or_print_report(self);
-        (domain, problem, c_problem)
+        (domain, problem)
+    }
+
+    pub fn compile<'ast, 'src>(
+        &self,
+        domain: &'ast Domain<'src>,
+        problem: &'ast Problem<'src>,
+    ) -> CompiledProblem<'src>
+    where
+        'ast: 'src,
+    {
+        compile_problem(domain, problem).unwrap_or_print_report(self)
     }
 }
 
@@ -177,17 +195,19 @@ pub trait ReportPrinter<O> {
     fn unwrap_or_print_report(self, sources: &Sources) -> O;
 }
 
-impl<'src, O> ReportPrinter<O> for Result<O, Error> {
+impl<'src, O> ReportPrinter<O> for Result<O, Vec<Error>> {
     fn unwrap_or_print_report(self, sources: &Sources) -> O {
         match self {
-            Err(e) => {
-                let filename = match e.span.is_problem {
-                    true => &sources.problem_path,
-                    false => &sources.domain_path,
-                };
-                e.report(filename.to_str().unwrap())
-                    .eprint(sources)
-                    .unwrap();
+            Err(vec) => {
+                for e in vec {
+                    let filename = match e.span.is_problem {
+                        true => &sources.problem_path,
+                        false => &sources.domain_path,
+                    };
+                    e.report(filename.to_str().unwrap())
+                        .eprint(sources)
+                        .unwrap();
+                }
                 panic!()
             }
             Ok(cd) => cd,
@@ -200,7 +220,7 @@ impl Error {
         Self {
             kind: ErrorKind::UnsetRequirement(requirements),
             chain: None,
-            span: parser::ast::SpannedAst::span(&input),
+            span: SpannedAst::span(&input),
         }
     }
 }
@@ -245,7 +265,8 @@ impl Error {
             MissmatchedDomain => label.with_message(format!("Problem and Domain names missmatch.")),
             ExpectedName => label.with_message("Expected Name"),
             UndefinedType => label.with_message("Domain :types() does not declare this type."),
-            UnreadPredicate => label.with_message(format!("Unread predicate.")),
+            UnmetGoal => label.with_message("Problem goal can not be met."),
+            UnmetPredicate => label.with_message("Predicate is impossible to satisfy."),
         }
     }
     pub fn report<'fname>(
@@ -259,9 +280,7 @@ impl Error {
             self.span.start,
         );
         let mut report = match self.kind {
-            MissmatchedDomain | UndefinedType | UnreadPredicate | ExpectedName => {
-                report.with_message("Domain Error")
-            }
+            MissmatchedDomain | UndefinedType | ExpectedName => report.with_message("Domain Error"),
             _ => report.with_message("Parser Error"),
         };
         report.add_label(self.make_label(filename));
@@ -269,9 +288,6 @@ impl Error {
             UnclosedParenthesis(pos) => report.add_label(
                 ariadne::Label::new((filename, pos..pos + 1)).with_message("Matching '('"),
             ),
-            UnreadPredicate => {
-                report.set_note("These predicates should be removed or used in actions.")
-            }
             _ => (),
         }
         let mut cerror = self;

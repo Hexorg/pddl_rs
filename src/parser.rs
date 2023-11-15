@@ -6,7 +6,7 @@ use crate::{Error, ErrorKind};
 use ast::Requirement::*;
 use enumset::{enum_set, EnumSet};
 
-use ast::*;
+use ast::{name::Name, span::*, *};
 
 pub use input::Input;
 
@@ -144,7 +144,7 @@ fn preceded_span_included<'src, O1, O2, F, G>(
     mut second: G,
 ) -> impl FnMut(Input<'src>) -> IResult<O2>
 where
-    O1: SpannedAst<'src> + 'src,
+    O1: SpannedAst + 'src,
     O2: SpannedAstMut<'src> + 'src,
     F: Parser<Input<'src>, O1, Error>,
     G: Parser<Input<'src>, O2, Error>,
@@ -224,7 +224,7 @@ fn pddl_anyletter(input: Input) -> IResult<Input> {
 ///     constraints:None,
 ///     actions:vec![]}))
 /// ```
-pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Error> {
+pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Vec<Error>> {
     let input = Input {
         // filename,
         src,
@@ -267,7 +267,7 @@ pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Error> {
     )(input)
     {
         Ok((_, domain)) => Ok(domain),
-        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(e),
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![e]),
         _ => panic!(),
     }
 }
@@ -604,7 +604,7 @@ use name as action_symbol;
 #[inline]
 fn literal<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<NegativeFormula<O2>>
 where
-    O2: 'src,
+    O2: std::fmt::Display + 'src,
     G: Copy + FnMut(Input<'src>) -> IResult<O2>,
 {
     move |i| {
@@ -915,7 +915,7 @@ fn timed_effect(input: Input) -> IResult<TimedEffect> {
 pub fn parse_problem<'src>(
     src: &'src str,
     requirements: EnumSet<Requirement>,
-) -> Result<Problem<'src>, Error> {
+) -> Result<Problem<'src>, Vec<Error>> {
     let input = Input {
         is_problem: true,
         src,
@@ -964,7 +964,7 @@ pub fn parse_problem<'src>(
     )(input)
     {
         Ok((_, problem)) => Ok(problem),
-        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(e),
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(vec![e]),
         _ => panic!(),
     }
 }
@@ -1096,7 +1096,7 @@ fn metric_f_exp(input: Input) -> IResult<MetricFluentExpr> {
 
 #[cfg(test)]
 mod tests {
-    use super::ast::Span;
+    use super::ast::{name::Name, span::Span};
     use super::*;
 
     #[test]
