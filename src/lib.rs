@@ -28,14 +28,15 @@
 //! let domain_filename = PathBuf::from("sample_problems/simple_domain.pddl");
 //! let problem_filename = PathBuf::from("sample_problems/simple_problem.pddl");
 //! let sources = Sources::load(domain_filename, problem_filename);
-//! let (domain, problem, c_problem) = sources.compile();
+//! let (domain, problem) = sources.parse();
+//! let c_problem = sources.compile(&domain, &problem);
 //! println!("Compiled problem needs {} bits of memory and uses {} actions.", c_problem.memory_size, c_problem.actions.len());
-//! let mut args = AstarInternals::new();
-//! if let Some(solution) = a_star(&c_problem, &mut args) {
+//! let mut args = AstarInternals::new(&c_problem.action_graph);
+//! if let Some(solution) = a_star(&c_problem, Some(&domain), Some(&problem), &mut args) {
 //!     println!("Solution is {} actions long.", solution.len());
 //!     for action_id in &solution {
 //!         let action = c_problem.actions.get(*action_id as usize).unwrap();
-//!         println!("\t{}{:?}", domain.actions[action.domain_action_idx as usize].name(), action.args.iter().map(|(row, col)| problem.objects.get_object(*row,*col).item.1).collect::<Vec<&str>>());
+//!         println!("\t{}{:?}", domain.actions[action.domain_action_idx as usize].name(), action.args.iter().map(|(row, col)| problem.objects.get_object_name(*row,*col).1).collect::<Vec<&str>>());
 //! }
 //! }
 //! ```
@@ -52,7 +53,7 @@ use compiler::{compile_problem, parse_domain, parse_problem, CompiledProblem, Do
 /// Used to represent domain requirements.
 pub use enumset::EnumSet;
 use parser::ast::span::Span;
-pub use parser::ast::{Objects, Requirement, span::SpannedAst};
+pub use parser::ast::{span::SpannedAst, Objects, Requirement};
 use std::{ops::Range, path::PathBuf};
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -81,10 +82,6 @@ enum ErrorKind {
     // Compiler Errors
     MissmatchedDomain,
     UndefinedType,
-    UnreadPredicate,
-    RedefinedPredicate,
-    RedefinedObject,
-    RedefinedType,
     ExpectedName,
     UnmetGoal,
     UnmetPredicate,
@@ -166,7 +163,14 @@ impl Sources {
         (domain, problem)
     }
 
-    pub fn compile(&self, domain:&Domain, problem:&Problem) -> CompiledProblem {
+    pub fn compile<'ast, 'src>(
+        &self,
+        domain: &'ast Domain<'src>,
+        problem: &'ast Problem<'src>,
+    ) -> CompiledProblem<'src>
+    where
+        'ast: 'src,
+    {
         compile_problem(domain, problem).unwrap_or_print_report(self)
     }
 }
@@ -201,8 +205,8 @@ impl<'src, O> ReportPrinter<O> for Result<O, Vec<Error>> {
                         false => &sources.domain_path,
                     };
                     e.report(filename.to_str().unwrap())
-                    .eprint(sources)
-                    .unwrap();
+                        .eprint(sources)
+                        .unwrap();
                 }
                 panic!()
             }
@@ -261,12 +265,8 @@ impl Error {
             MissmatchedDomain => label.with_message(format!("Problem and Domain names missmatch.")),
             ExpectedName => label.with_message("Expected Name"),
             UndefinedType => label.with_message("Domain :types() does not declare this type."),
-            UnreadPredicate => label.with_message(format!("Unread predicate.")),
-            RedefinedPredicate => label.with_message("Predicate already defined."),
-            RedefinedObject => label.with_message("Object already defined."),
-            RedefinedType => label.with_message("Type already defined."),
             UnmetGoal => label.with_message("Problem goal can not be met."),
-            UnmetPredicate => label.with_message("Predicate is impossible to satisfy.")
+            UnmetPredicate => label.with_message("Predicate is impossible to satisfy."),
         }
     }
     pub fn report<'fname>(
@@ -280,9 +280,7 @@ impl Error {
             self.span.start,
         );
         let mut report = match self.kind {
-            MissmatchedDomain | UndefinedType | UnreadPredicate | ExpectedName => {
-                report.with_message("Domain Error")
-            }
+            MissmatchedDomain | UndefinedType | ExpectedName => report.with_message("Domain Error"),
             _ => report.with_message("Parser Error"),
         };
         report.add_label(self.make_label(filename));
@@ -290,9 +288,6 @@ impl Error {
             UnclosedParenthesis(pos) => report.add_label(
                 ariadne::Label::new((filename, pos..pos + 1)).with_message("Matching '('"),
             ),
-            UnreadPredicate => {
-                report.set_note("These predicates should be removed or used in actions.")
-            }
             _ => (),
         }
         let mut cerror = self;

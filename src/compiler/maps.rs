@@ -1,13 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-};
+use std::collections::HashMap;
 
 use enumset::EnumSet;
 
-use super::{
-    AtomicFormula,
-    Domain, List, Name, PredicateUsize, Problem, span::Span, Type, CompiledAction, CompiledActionUsize,
-};
+use super::{span::Span, AtomicFormula, Domain, List, Name, PredicateUsize, Problem, Type};
 use crate::{Error, ErrorKind, Requirement};
 
 /// Logical structures for compiling PDDL problems.
@@ -30,7 +25,6 @@ pub struct Maps<'src> {
     pub memory_map: Vec<AtomicFormula<'src, Name<'src>>>,
     // /// Mapping of argument vectors to compiled actions that use them
     // pub args_map: Vec<HashMap<Name<'src>, (PredicateUsize, PredicateUsize)>>,
-
 }
 
 /// Perform basic sanity checks like if the problem's domain match domain name
@@ -187,5 +181,4 @@ pub fn map_objects<'src>(
 // }
 
 #[cfg(test)]
-mod test {
-}
+mod test {}

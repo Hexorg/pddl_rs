@@ -1,19 +1,17 @@
 use std::{
+    collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     hash::Hash,
-    ops::Range, collections::{HashMap, HashSet},
 };
 
 pub mod span;
-use span::*;
+pub use span::*;
 pub mod name;
-use name::*;
+pub use name::*;
 
 use enumset::{EnumSet, EnumSetType};
 
 use crate::{compiler::PredicateUsize, ErrorKind};
-
-
 
 pub trait Objects<'src> {
     fn get_object_name(&self, row: PredicateUsize, col: PredicateUsize) -> Name<'src>;
@@ -41,7 +39,6 @@ pub struct Problem<'src> {
     pub metric: Option<Metric<'src>>,
     // pub length: Option<LengthSpecification>, // deprecated since PDDL 2.1
 }
-
 
 impl<'src> Problem<'src> {
     pub fn get_objects(&self) -> Vec<Name<'src>> {
@@ -240,13 +237,13 @@ pub enum GD<'src> {
 
 #[derive(PartialEq, Debug)]
 pub enum FluentExpression<'src> {
-    Number(i64),                                               // :numeric-fluents
+    Number(i64),                                   // :numeric-fluents
     Subtract(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
     Negate(Box<Spanned<Self>>),
     Divide(Box<(Spanned<Self>, Spanned<Self>)>), // :numeric-fluents
-    Add(Vec<Spanned<Self>>),                           // :numeric-fluents
-    Multiply(Vec<Spanned<Self>>),                      // :numeric-fluents
-    Function(FunctionTerm<'src>),                            // :numeric-fluents
+    Add(Vec<Spanned<Self>>),                     // :numeric-fluents
+    Multiply(Vec<Spanned<Self>>),                // :numeric-fluents
+    Function(FunctionTerm<'src>),                // :numeric-fluents
 }
 
 #[derive(PartialEq, Debug)]
@@ -445,7 +442,11 @@ pub enum Type<'src> {
 impl<'src> SpannedAst for Type<'src> {
     fn span(&self) -> Span {
         match self {
-            Type::None => Span { start: 0, end: 0, is_problem: false },
+            Type::None => Span {
+                start: 0,
+                end: 0,
+                is_problem: false,
+            },
             Type::Either(vec) => vec.span(),
             Type::Exact(name) => name.span(),
         }
@@ -455,7 +456,10 @@ impl<'src> Display for Type<'src> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::None => f.write_str("[None]"),
-            Type::Either(vec) => f.write_fmt(format_args!("(either {})", vec.iter().map(|n| n.1).collect::<Vec<_>>().join(", "))),
+            Type::Either(vec) => f.write_fmt(format_args!(
+                "(either {})",
+                vec.iter().map(|n| n.1).collect::<Vec<_>>().join(", ")
+            )),
             Type::Exact(name) => f.write_str(name.1),
         }
     }
@@ -499,7 +503,7 @@ pub struct FunctionTypedList<'src> {
     pub kind: FunctionType<'src>,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct List<'src> {
     pub items: Vec<Name<'src>>,
     pub kind: Type<'src>,
@@ -510,17 +514,44 @@ pub enum AtomicFormula<'src, T> {
     Predicate(Name<'src>, Vec<T>),
     Equality(T, T),
 }
-impl<'src, T> Display for AtomicFormula<'src, T> where T:Display{
+impl<'src, T> Display for AtomicFormula<'src, T>
+where
+    T: Display,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AtomicFormula::Predicate(name, vec) => f.write_fmt(format_args!("{}({})", name, vec.iter().map(|i| format!("{}", i)).collect::<Vec<_>>().join(", "))),
-            AtomicFormula::Equality(left, right) => f.write_fmt(format_args!("{} = {}", left, right)),
+            AtomicFormula::Predicate(name, vec) => f.write_fmt(format_args!(
+                "{}({})",
+                name,
+                vec.iter()
+                    .map(|i| format!("{}", i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            AtomicFormula::Equality(left, right) => {
+                f.write_fmt(format_args!("{} = {}", left, right))
+            }
         }
     }
 }
-impl<'src, T> Debug for AtomicFormula<'src, T> where T:Display {
+impl<'src, T> Debug for AtomicFormula<'src, T>
+where
+    T: Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <Self as Display>::fmt(self, f)
+        match self {
+            AtomicFormula::Predicate(name, vec) => f.write_fmt(format_args!(
+                "{}({})",
+                name,
+                vec.iter()
+                    .map(|i| format!("{:?}", i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            AtomicFormula::Equality(left, right) => {
+                f.write_fmt(format_args!("{:?} = {:?}", left, right))
+            }
+        }
     }
 }
 impl<'src, T> AtomicFormula<'src, T> {
@@ -533,10 +564,10 @@ impl<'src, T> AtomicFormula<'src, T> {
 }
 
 impl<'src> AtomicFormula<'src, Name<'src>> {
-    pub fn predicate(name: Name<'src>, args: Vec<Name<'src>>) -> Self {
-        Self::Predicate(name, args)
-    }
-    pub fn to_typed(&self, type_tree: &HashMap<&'src str, Name<'src>>) -> HashSet<AtomicFormula<'src, Type<'src>>> {
+    pub fn to_typed(
+        &self,
+        type_tree: &HashMap<&'src str, Name<'src>>,
+    ) -> HashSet<AtomicFormula<'src, Type<'src>>> {
         let mut result = HashSet::new();
         match self {
             AtomicFormula::Predicate(predicate, objects) => {
@@ -547,19 +578,25 @@ impl<'src> AtomicFormula<'src, Name<'src>> {
                     let mut new_type_vec = Vec::new();
                     if type_tree.len() > 0 {
                         for obj in &type_vec {
-                                let type_name = *type_tree.get(obj.1).unwrap();
-                                if type_name.1 != "object" {
-                                    more_iterations = true;
-                                }
-                                new_type_vec.push(type_name);
+                            let type_name = *type_tree.get(obj.1).unwrap();
+                            if type_name.1 != "object" {
+                                more_iterations = true;
+                            }
+                            new_type_vec.push(type_name);
                         }
-                        result.insert(AtomicFormula::Predicate(*predicate, new_type_vec.iter().map(|t| Type::Exact(*t)).collect()));
+                        result.insert(AtomicFormula::Predicate(
+                            *predicate,
+                            new_type_vec.iter().map(|t| Type::Exact(*t)).collect(),
+                        ));
                     } else {
-                        result.insert(AtomicFormula::Predicate(*predicate, (0..type_vec.len()).map(|_| Type::None).collect()));
+                        result.insert(AtomicFormula::Predicate(
+                            *predicate,
+                            (0..type_vec.len()).map(|_| Type::None).collect(),
+                        ));
                     }
                     type_vec = new_type_vec;
                 }
-            },
+            }
             AtomicFormula::Equality(_, _) => todo!(),
         }
         result
@@ -606,49 +643,25 @@ impl<'src> TryInto<AtomicFormula<'src, Name<'src>>> for &AtomicFormula<'src, Ter
 }
 
 impl<'src> AtomicFormula<'src, Term<'src>> {
-    pub fn generalized_to_type(
-        &self,
-        parameters: &Vec<List<'src>>,
-    ) -> AtomicFormula<'src, Type<'src>> {
-        match self {
-            AtomicFormula::Predicate(predicate, variables) => {
-                let mut type_vec = Vec::new();
-                for var in variables {
-                    match var {
-                        Term::Name(n) | Term::Variable(n) => parameters.iter().for_each(|l| {
-                            let mut iter = l.items.iter();
-                            while iter.by_ref().find(|item| item.1 == n.1).is_some() {
-                                type_vec.push(l.kind.clone())
-                            }
-                        }),
-                        Term::Function(_) => todo!(),
-                    }
-                }
-                AtomicFormula::Predicate(predicate.clone(), type_vec)
-            }
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-    }
     pub fn concrete(
         &self,
-        problem: &Problem<'src>,
+        objects: &impl Objects<'src>,
         args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
-    ) -> AtomicFormula<'src, Name<'src>>
-    {
+    ) -> AtomicFormula<'src, Name<'src>> {
         match self {
             AtomicFormula::Predicate(predicate, variables) => {
-                let mut name_vec:Vec<Name<'src>> = Vec::new();
+                let mut name_vec: Vec<Name<'src>> = Vec::with_capacity(variables.len());
                 for variable in variables {
                     match variable {
                         Term::Name(name) => name_vec.push(*name),
                         Term::Variable(var) => {
                             for (from, to) in args {
                                 if from == var {
-                                    name_vec.push(problem.objects.get_object_name(to.0, to.1));
+                                    name_vec.push(objects.get_object_name(to.0, to.1));
                                     break;
                                 }
                             }
-                        },
+                        }
                         Term::Function(_) => todo!(),
                     }
                 }
@@ -657,29 +670,63 @@ impl<'src> AtomicFormula<'src, Term<'src>> {
             AtomicFormula::Equality(_, _) => todo!(),
         }
     }
-    pub fn concrete_from_map(&self, problem:&Problem<'src>, map:&HashMap<Name<'src>, (PredicateUsize, PredicateUsize)>) -> AtomicFormula<'src, Name<'src>> {
+    pub fn concrete_from_map(
+        &self,
+        problem: &Problem<'src>,
+        map: &HashMap<Name<'src>, (PredicateUsize, PredicateUsize)>,
+    ) -> AtomicFormula<'src, Name<'src>> {
         match self {
             AtomicFormula::Predicate(predicate, variables) => {
-                let mut name_vec = Vec::new();
+                let mut name_vec = Vec::with_capacity(variables.len());
                 for variable in variables {
                     name_vec.push(match variable {
                         Term::Name(name) => *name,
                         Term::Variable(var) => {
                             let (row, col) = map.get(var).unwrap();
                             problem.objects.get_object_name(*row, *col)
-                        },
+                        }
                         Term::Function(_) => todo!(),
                     });
                 }
                 AtomicFormula::Predicate(predicate.clone(), name_vec)
-            },
+            }
+            AtomicFormula::Equality(_, _) => todo!(),
+        }
+    }
+    pub fn fake_concrete(
+        &self,
+        args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
+    ) -> AtomicFormula<'src, (PredicateUsize, PredicateUsize)> {
+        match self {
+            AtomicFormula::Predicate(predicate, variables) => {
+                let mut fake_vec: Vec<(PredicateUsize, PredicateUsize)> =
+                    Vec::with_capacity(variables.len());
+                for variable in variables {
+                    match variable {
+                        Term::Variable(var) => {
+                            for (from, to) in args {
+                                if from == var {
+                                    fake_vec.push(*to);
+                                    break;
+                                }
+                            }
+                        }
+                        Term::Name(_) => panic!("Already concrete."),
+                        Term::Function(_) => todo!(),
+                    }
+                }
+                AtomicFormula::Predicate(predicate.clone(), fake_vec)
+            }
             AtomicFormula::Equality(_, _) => todo!(),
         }
     }
 }
 
 #[derive(PartialEq, Debug)]
-pub enum NegativeFormula<'src, T> where T:Display{
+pub enum NegativeFormula<'src, T>
+where
+    T: Display,
+{
     Direct(AtomicFormula<'src, T>),
     Not(AtomicFormula<'src, T>),
 }
@@ -722,7 +769,7 @@ impl<'src> PartialEq for Term<'src> {
         match self {
             Term::Name(l) => match other {
                 Term::Name(r) => l.eq(r),
-                _ => false
+                _ => false,
             },
             Term::Variable(_) => match other {
                 Term::Variable(_) => true,
@@ -730,7 +777,7 @@ impl<'src> PartialEq for Term<'src> {
             },
             Term::Function(l) => match other {
                 Term::Function(r) => l.eq(r),
-                _ => false
+                _ => false,
             },
         }
     }
@@ -757,32 +804,5 @@ impl<'src> SpannedAst for Term<'src> {
             Self::Variable(v) => v.0,
             Self::Function(f) => f.span(),
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    #[derive(Copy, Clone)]
-    struct Name<'src> {
-        name:&'src str
-    }
-
-    struct Problem<'src> {
-        names: Vec<Vec<Name<'src>>>,
-    }
-
-    trait Objects<'src> {
-        fn get_object(&self, row:usize, col:usize) -> Name<'src>;
-    }
-
-    impl<'src> Objects<'src> for Vec<Vec<Name<'src>>> {
-        fn get_object(&self,row:usize, col:usize) -> Name<'src> {
-            self[row][col]
-        }
-    }
-
-    fn get_name<'src>(problem:&Problem<'src>, row:usize, col:usize) -> Name<'src> {
-        problem.names.get_object(row, col)
-        // problem.names[row][col]
     }
 }

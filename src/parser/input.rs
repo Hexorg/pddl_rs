@@ -1,4 +1,7 @@
-use super::ast::{Requirement, span::{Span, SpannedAst}};
+use super::ast::{
+    span::{Span, SpannedAst},
+    Requirement,
+};
 use enumset::EnumSet;
 use nom::{Compare, InputIter, InputLength, InputTake, Offset, Slice, UnspecializedInput};
 use std::{

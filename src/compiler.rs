@@ -1,7 +1,6 @@
-use std::{collections::HashMap, slice::Iter};
+use std::{collections::HashMap, ops::Range, slice::Iter};
 
 mod maps;
-use maps::Maps;
 use enumset::{EnumSet, EnumSetType};
 mod passes;
 
@@ -9,10 +8,17 @@ mod passes;
 pub mod action_graph;
 mod inertia;
 
-pub use crate::parser::{ast::{*, name::Name}, *};
+pub use crate::parser::{
+    ast::{name::Name, *},
+    *,
+};
 use crate::{Error, ErrorKind};
 
-use self::{action_graph::ActionGraph, maps::{validate_problem, map_objects}, passes::Compiler};
+use self::{
+    action_graph::ActionGraph,
+    maps::{map_objects, validate_problem},
+    passes::Compiler,
+};
 
 pub type PredicateUsize = u16;
 pub type ASTActionUsize = u16;
@@ -69,7 +75,7 @@ pub trait Runnable {
     fn run_mut(self, state: &mut [bool], functions: &mut [IntValue]);
     fn state_miss_count(self, state: &[bool]) -> IntValue;
     fn disasm(self) -> String;
-    fn decomp(self, memory_map:&Vec<AtomicFormula<Name>>) -> String;
+    fn decomp(self, memory_map: &Vec<AtomicFormula<Name>>) -> String;
 }
 
 impl Runnable for &[Instruction] {
@@ -211,15 +217,19 @@ impl Runnable for &[Instruction] {
         result
     }
 
-    fn decomp(self, memory_map:&Vec<AtomicFormula<Name>>) -> String {
+    fn decomp(self, memory_map: &Vec<AtomicFormula<Name>>) -> String {
         let mut result = String::with_capacity(self.len() * 6);
         for instruction in self {
             if result.len() > 0 {
                 result.push_str(", ");
             }
             match instruction {
-                Instruction::ReadState(addr) => result.push_str(&format!("RS({})", memory_map[*addr as usize])),
-                Instruction::SetState(addr) => result.push_str(&format!("WS({})", memory_map[*addr as usize])),
+                Instruction::ReadState(addr) => {
+                    result.push_str(&format!("RS({})", memory_map[*addr as usize]))
+                }
+                Instruction::SetState(addr) => {
+                    result.push_str(&format!("WS({})", memory_map[*addr as usize]))
+                }
                 Instruction::ReadFunction(addr) => result.push_str(&format!("RF({})", *addr)),
                 Instruction::SetFunction(addr) => result.push_str(&format!("WF({})", *addr)),
                 Instruction::And(count) => result.push_str(&format!("AND_{}", *count)),
@@ -238,7 +248,7 @@ impl Runnable for &[Instruction] {
 /// All instrutions use shared memory offsets
 /// no larger than `self.memory_size`
 #[derive(Debug, PartialEq)]
-pub struct CompiledProblem {
+pub struct CompiledProblem<'src> {
     /// How many bits needed to fully represent this problem's state
     /// (Actual memory used depends on type used to represent state.
     /// A Vec<bool> will use `memory_size` bytes.)
@@ -248,12 +258,14 @@ pub struct CompiledProblem {
     /// All compiled actions for this problem. Each domain action compiles into
     /// multiple [`CompiledAction`]s due to object permutations for various predicates and types.
     pub actions: Vec<CompiledAction>,
+    /// Mapping of domain action index to a range of compiled actions representing those actions for all used problem objects
+    pub domain_action_ranges: Vec<Range<CompiledActionUsize>>,
     /// Executable bytecode to set initial conditions
     pub init: Vec<Instruction>,
     /// Executable bytecode to check if the goal is met
     pub goal: Vec<Instruction>,
     /// Priority list of compiled actions to try
-    pub action_graph: ActionGraph,
+    pub action_graph: ActionGraph<'src>,
 }
 
 /// Flatenned representation of Actions inside [`CompiledProblem`]s
@@ -303,13 +315,15 @@ impl Optimization {
 pub fn compile_problem<'src, 'ast>(
     domain: &'ast Domain<'src>,
     problem: &'ast Problem<'src>,
-) -> Result<CompiledProblem, Vec<Error>> {
+) -> Result<CompiledProblem<'src>, Vec<Error>>
+where
+    'ast: 'src,
+{
     validate_problem(domain, problem)?;
-    let mut maps = map_objects(domain, problem)?;
+    let maps = map_objects(domain, problem)?;
     let mut compiler = Compiler::new(domain, problem, maps);
     compiler.compile()
 }
-
 
 /// Given a list of types, use a type to object map and generate all possible
 /// permutations of the objects fitting the list.
@@ -330,10 +344,7 @@ where
     use ErrorKind::UndefinedType;
 
     fn _has_collition<'parent, 'src>(
-        args: &[(
-            Name<'src>,
-            (PredicateUsize, PredicateUsize),
-        )],
+        args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
         iterators: &[(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
     ) -> bool {
         for i in 0..iterators.len() {
@@ -361,10 +372,7 @@ where
     fn _args_iter<'parent, 'src>(
         type_to_objects: &'parent HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
         iterators: &mut [(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
-        args: &mut [(
-            Name<'src>,
-            (PredicateUsize, PredicateUsize),
-        )],
+        args: &mut [(Name<'src>, (PredicateUsize, PredicateUsize))],
         pos: usize,
     ) -> bool {
         if let Some(arg) = iterators[pos].1.next() {

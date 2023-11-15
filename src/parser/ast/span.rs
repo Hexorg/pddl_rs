@@ -1,5 +1,7 @@
-use std::{ops::Range, fmt::{Debug, Display}};
-
+use std::{
+    fmt::{Debug, Display},
+    ops::Range,
+};
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 /// Span of an AST element in the source code. `start` and `end` represet byte-offsets in the source code

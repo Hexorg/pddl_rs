@@ -1,7 +1,10 @@
-use std::{ops::Range, fmt::{Display, Debug}, hash::Hash};
+use std::{
+    fmt::{Debug, Display},
+    hash::Hash,
+    ops::Range,
+};
 
 use super::span::*;
-
 
 #[derive(Clone, Copy)]
 pub struct Name<'src>(pub Span, pub &'src str);

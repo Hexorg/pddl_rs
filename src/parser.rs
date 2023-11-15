@@ -6,7 +6,7 @@ use crate::{Error, ErrorKind};
 use ast::Requirement::*;
 use enumset::{enum_set, EnumSet};
 
-use ast::{*, span::*, name::Name};
+use ast::{name::Name, span::*, *};
 
 pub use input::Input;
 
@@ -604,7 +604,7 @@ use name as action_symbol;
 #[inline]
 fn literal<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<NegativeFormula<O2>>
 where
-    O2: std::fmt::Display+'src,
+    O2: std::fmt::Display + 'src,
     G: Copy + FnMut(Input<'src>) -> IResult<O2>,
 {
     move |i| {
@@ -1096,7 +1096,7 @@ fn metric_f_exp(input: Input) -> IResult<MetricFluentExpr> {
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{span::Span, name::Name};
+    use super::ast::{name::Name, span::Span};
     use super::*;
 
     #[test]
