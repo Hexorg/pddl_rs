@@ -1,22 +1,27 @@
-use std::{collections::HashMap, ops::Range, slice::Iter};
+use std::{collections::{HashMap, HashSet}, ops::Range, slice::Iter, path::PathBuf};
 
-mod maps;
+pub mod maps;
 use enumset::{EnumSet, EnumSetType};
 mod passes;
+mod domain;
 
+pub mod action_plotter;
 // optimization mods
 pub mod action_graph;
-mod inertia;
+pub mod inertia;
+pub mod atomic_formula_map;
+mod solution_estimation;
 
-pub use crate::parser::{
-    ast::{name::Name, *},
+use crate::parser::{
+    ast::{name::Name, *, r#type::Type, atomic_formula::AtomicFormula, list::{TypedList, List}},
     *,
 };
 use crate::{Error, ErrorKind};
 
 use self::{
     action_graph::ActionGraph,
-    maps::{map_objects, validate_problem},
+    maps::{validate_problem, Maps},
+    inertia::Inertia,
     passes::Compiler,
 };
 
@@ -42,48 +47,23 @@ pub enum Instruction {
     Push(IntValue),
 }
 
-/// [`Instruction`] interpreter has stack of this type to help safety of different storage types.
-enum Value {
-    Bool(bool),
-    Int(IntValue),
-}
-
-impl Default for Value {
-    fn default() -> Self {
-        Self::Bool(false)
-    }
-}
-
-impl Value {
-    pub fn unwrap_bool(&self) -> bool {
-        match self {
-            Self::Bool(b) => *b,
-            _ => panic!("Expected bool stack item."),
-        }
-    }
-    pub fn unwrap_int(&self) -> IntValue {
-        match self {
-            Self::Int(i) => *i,
-            _ => panic!("Expected int stack item."),
-        }
-    }
-}
 
 /// Helper trait to easier manage `Vec<Instruction>` fields of actions.
 pub trait Runnable {
-    fn run(self, state: &[bool], functions: &[IntValue]) -> bool;
-    fn run_mut(self, state: &mut [bool], functions: &mut [IntValue]);
-    fn state_miss_count(self, state: &[bool]) -> IntValue;
+    fn run(self, state: &[bool], functions: &[IntValue], state_stack: &mut Vec<bool>, function_stack: &mut Vec<IntValue>) -> bool;
+    fn run_mut(self, state: &mut [bool], functions: &mut [IntValue], state_stack: &mut Vec<bool>, function_stack: &mut Vec<IntValue>);
+    fn state_miss_count(self, state: &[bool], state_stack: &mut Vec<bool>) -> IntValue;
     fn disasm(self) -> String;
     fn decomp(self, memory_map: &Vec<AtomicFormula<Name>>) -> String;
 }
 
 impl Runnable for &[Instruction] {
-    fn run(self, state: &[bool], _: &[IntValue]) -> bool {
-        let mut stack = Vec::<Value>::with_capacity(512);
+    // #[inline]
+    fn run(self, state: &[bool], _: &[IntValue], state_stack: &mut Vec<bool>, function_stack: &mut Vec<IntValue>) -> bool {
+        // let mut bool_stack = Vec::<bool>::with_capacity(512);
         for instruction in self {
             match instruction {
-                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr as usize])),
+                Instruction::ReadState(addr) => state_stack.push(state[*addr as usize]),
                 Instruction::SetState(_) => panic!("Instructions try to chane immutable state."),
                 Instruction::ReadFunction(_) => todo!(),
                 Instruction::SetFunction(_) => todo!(),
@@ -91,97 +71,17 @@ impl Runnable for &[Instruction] {
                     let mut result = true;
                     let mut count = *count;
                     while count > 0 {
-                        result &= stack.pop().unwrap().unwrap_bool();
+                        result &= state_stack.pop().unwrap();
                         count -= 1;
                     }
-                    stack.push(Value::Bool(result));
+                    state_stack.push(result);
                 }
                 Instruction::Not => {
-                    if let Some(v) = stack.pop() {
-                        stack.push(Value::Bool(!v.unwrap_bool()));
+                    if let Some(v) = state_stack.pop() {
+                        state_stack.push(!v);
                     } else {
-                        stack.push(Value::Bool(false))
+                        state_stack.push(false);
                     }
-                }
-                Instruction::Or => todo!(),
-                Instruction::Add => todo!(),
-                Instruction::Sub => todo!(),
-                Instruction::Push(n) => stack.push(Value::Int(*n)),
-            }
-        }
-        stack.pop().unwrap_or_default().unwrap_bool()
-    }
-
-    fn run_mut(self, state: &mut [bool], functions: &mut [i64]) {
-        let mut stack = Vec::<Value>::with_capacity(512);
-        for instruction in self {
-            match instruction {
-                Instruction::SetState(addr) => {
-                    if let Some(v) = stack.pop() {
-                        state[*addr as usize] = v.unwrap_bool()
-                    } else {
-                        state[*addr as usize] = true
-                    }
-                }
-                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr as usize])),
-                Instruction::ReadFunction(addr) => {
-                    stack.push(Value::Int(functions[*addr as usize]))
-                } // todo
-                Instruction::SetFunction(addr) => {
-                    functions[*addr as usize] = stack.pop().unwrap().unwrap_int();
-                } // todo
-                Instruction::And(count) => {
-                    let mut result = true;
-                    let mut count = *count;
-                    while count > 0 {
-                        result &= stack.pop().unwrap().unwrap_bool();
-                        count -= 1;
-                    }
-                    stack.push(Value::Bool(result));
-                }
-                Instruction::Not => {
-                    if let Some(v) = stack.pop() {
-                        stack.push(Value::Bool(!v.unwrap_bool()));
-                    } else {
-                        stack.push(Value::Bool(false))
-                    }
-                }
-                Instruction::Or => todo!(),
-                Instruction::Add => {
-                    let s = stack.pop().unwrap().unwrap_int() + stack.pop().unwrap().unwrap_int();
-                    stack.push(Value::Int(s));
-                }
-                Instruction::Sub => todo!(),
-                Instruction::Push(n) => stack.push(Value::Int(*n)),
-            }
-        }
-    }
-
-    fn state_miss_count(self, state: &[bool]) -> i64 {
-        let mut stack = Vec::<Value>::with_capacity(512);
-        let mut state_miss_count = 0;
-        for instruction in self {
-            match instruction {
-                Instruction::ReadState(addr) => stack.push(Value::Bool(state[*addr as usize])),
-                Instruction::SetState(_) => todo!(),
-                Instruction::ReadFunction(_) => todo!(),
-                Instruction::SetFunction(_) => todo!(),
-                Instruction::And(count) => {
-                    let mut result = true;
-                    let mut count = *count;
-                    while count > 0 {
-                        let sv = stack.pop().unwrap().unwrap_bool();
-                        if !sv {
-                            state_miss_count += 1
-                        }
-                        result &= sv;
-                        count -= 1;
-                    }
-                    stack.push(Value::Bool(result));
-                }
-                Instruction::Not => {
-                    let s = !stack.pop().unwrap().unwrap_bool();
-                    stack.push(Value::Bool(s));
                 }
                 Instruction::Or => todo!(),
                 Instruction::Add => todo!(),
@@ -189,7 +89,85 @@ impl Runnable for &[Instruction] {
                 Instruction::Push(_) => todo!(),
             }
         }
-        if state_miss_count == 0 && !stack.pop().unwrap_or_default().unwrap_bool() {
+        state_stack.pop().unwrap_or_default()
+    }
+
+    fn run_mut(self, state: &mut [bool], functions: &mut [i64], state_stack: &mut Vec<bool>, function_stack: &mut Vec<IntValue>) {
+        for instruction in self {
+            match instruction {
+                Instruction::SetState(addr) => {
+                    if let Some(v) = state_stack.pop() {
+                        state[*addr as usize] = v
+                    } else {
+                        state[*addr as usize] = true
+                    }
+                }
+                Instruction::ReadState(addr) => state_stack.push(state[*addr as usize]),
+                Instruction::ReadFunction(addr) => {
+                    function_stack.push(functions[*addr as usize])
+                } // todo
+                Instruction::SetFunction(addr) => {
+                    functions[*addr as usize] = function_stack.pop().unwrap();
+                } // todo
+                Instruction::And(count) => {
+                    let mut result = true;
+                    let mut count = *count;
+                    while count > 0 {
+                        result &= state_stack.pop().unwrap();
+                        count -= 1;
+                    }
+                    state_stack.push(result);
+                }
+                Instruction::Not => {
+                    if let Some(v) = state_stack.pop() {
+                        state_stack.push(!v);
+                    } else {
+                        state_stack.push(false);
+                    }
+                }
+                Instruction::Or => todo!(),
+                Instruction::Add => {
+                    let s = function_stack.pop().unwrap() + function_stack.pop().unwrap();
+                    function_stack.push(s);
+                }
+                Instruction::Sub => todo!(),
+                Instruction::Push(n) => function_stack.push(*n),
+            }
+        }
+    }
+
+    fn state_miss_count(self, state: &[bool], state_stack: &mut Vec<bool>) -> i64 {
+        let mut state_miss_count = 0;
+        for instruction in self {
+            match instruction {
+                Instruction::ReadState(addr) => state_stack.push(state[*addr as usize]),
+                Instruction::SetState(_) => todo!(),
+                Instruction::ReadFunction(_) => todo!(),
+                Instruction::SetFunction(_) => todo!(),
+                Instruction::And(count) => {
+                    let mut result = true;
+                    let mut count = *count;
+                    while count > 0 {
+                        let sv = state_stack.pop().unwrap();
+                        if !sv {
+                            state_miss_count += 1
+                        }
+                        result &= sv;
+                        count -= 1;
+                    }
+                    state_stack.push(result);
+                }
+                Instruction::Not => {
+                    let s = !state_stack.pop().unwrap();
+                    state_stack.push(s);
+                }
+                Instruction::Or => todo!(),
+                Instruction::Add => todo!(),
+                Instruction::Sub => todo!(),
+                Instruction::Push(_) => todo!(),
+            }
+        }
+        if state_miss_count == 0 && !state_stack.pop().unwrap_or_default() {
             state_miss_count += 1;
         }
         state_miss_count
@@ -247,8 +225,8 @@ impl Runnable for &[Instruction] {
 /// Flatenned problem ready for solving
 /// All instrutions use shared memory offsets
 /// no larger than `self.memory_size`
-#[derive(Debug, PartialEq)]
-pub struct CompiledProblem<'src> {
+// #[derive(Debug, PartialEq)]
+pub struct CompiledProblem<'ast, 'src> {
     /// How many bits needed to fully represent this problem's state
     /// (Actual memory used depends on type used to represent state.
     /// A Vec<bool> will use `memory_size` bytes.)
@@ -265,7 +243,17 @@ pub struct CompiledProblem<'src> {
     /// Executable bytecode to check if the goal is met
     pub goal: Vec<Instruction>,
     /// Priority list of compiled actions to try
-    pub action_graph: ActionGraph<'src>,
+    pub action_graph: ActionGraph,
+    /// Summary of what actions can and can not run after each other
+    pub inertia:Inertia,
+    /// Set of predicate identifiers that represent constant predicates throughout problem solving 
+    pub constant_predicate_ids: HashSet<PredicateUsize>,
+    /// AST Domain of this problem
+    pub domain: &'ast Domain<'src>,
+    /// AST Problem of this Compiled Problem
+    pub problem: &'ast Problem<'src>,
+    /// Maps between AST names and Compiled indexes/numbers
+    pub maps: Maps<'src>,
 }
 
 /// Flatenned representation of Actions inside [`CompiledProblem`]s
@@ -278,7 +266,7 @@ pub struct CompiledAction {
     /// Exact object arguments bound to this action. PDDL actions use types to permutate themselves
     /// over various objects. CompiledActions are bound to exact objcts. First u16 is the offset in
     /// problem.objects list. Second u16 is the offset in that list's variables.
-    pub args: Vec<(PredicateUsize, PredicateUsize)>,
+    pub args: Vec<PredicateUsize>,
     /// Executable bytecode to check if action's preconditions are met.
     pub precondition: Vec<Instruction>,
     /// Executable bytecode to apply action effects.
@@ -294,6 +282,33 @@ impl CompiledAction {
             effect: Vec::new(),
         }
     }
+}
+
+impl<'ast, 'src> CompiledProblem<'ast, 'src> {
+    /// Get the AST action that this action was compiled from.
+    pub fn get_domain_action(&self, action_idx:CompiledActionUsize) -> &'ast Action<'src> {
+        &self.domain.actions[self.actions[action_idx as usize].domain_action_idx as usize]
+    }
+    pub fn get_action_name(&self, action_idx:CompiledActionUsize) -> Name<'src> {
+        self.get_domain_action(action_idx).name()
+    }
+
+    pub fn get_action_objects<'me>(&'me self, action_idx:CompiledActionUsize) -> impl Iterator<Item = &'src str> + 'me {
+        self.actions[action_idx as usize].args.iter()
+        .map(move |object_idx| self.maps.id_object_map[*object_idx as usize].1)
+    }
+
+    pub fn get_action_string(&self, action_idx:CompiledActionUsize) -> String {
+        format!(
+            "{}({})",
+            self.get_action_name(action_idx),
+            self.get_action_objects(action_idx).collect::<Vec<_>>().join(",")
+        )
+    }
+
+    // pub fn action_path_to_string(&self, path:&Vec<CompiledActionUsize>, sep:&str) -> String {
+    //     path.iter().map(|idx| self.get_action_string(*idx)).collect::<Vec<_>>().join(sep)
+    // }
 }
 
 /// Enumeration of various optimizations implemented in the compiler
@@ -312,88 +327,63 @@ impl Optimization {
 
 /// Compile and optimize parsed [`Domain`] and [`Problem`] structures into a compiled problem ready for using in search methods.
 /// Load them from a file using [`parse_domain`] and [`parse_problem`] functions.
-pub fn compile_problem<'src, 'ast>(
+pub fn compile_problem<'ast, 'src>(
     domain: &'ast Domain<'src>,
     problem: &'ast Problem<'src>,
-) -> Result<CompiledProblem<'src>, Vec<Error>>
+    domain_file_path: PathBuf,
+    problem_file_path: PathBuf,
+) -> Result<CompiledProblem<'ast, 'src>, Vec<Error>>
 where
     'ast: 'src,
 {
     validate_problem(domain, problem)?;
-    let maps = map_objects(domain, problem)?;
-    let mut compiler = Compiler::new(domain, problem, maps);
+    let mut compiler = Compiler::new(domain, problem, domain_file_path, problem_file_path);
     compiler.compile()
 }
 
-/// Given a list of types, use a type to object map and generate all possible
-/// permutations of the objects fitting the list.
-///
-/// # Arguments
-/// * `type_to_objects` - a map of type names to vector of all world objects of that type.
-/// * `list` - the argument list that needs to be populated with world objects.
-/// * `f` - closure that gets all permutations of objects populated the `list` in a form of a slice
-///     mapping `list`'s items to world object indexes - `&[(ListItemName, (row, col))]`
-fn for_all_type_object_permutations<'src, F, O>(
-    type_to_objects: &HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
-    list: &[List<'src>],
-    mut f: F,
-) -> Result<Vec<O>, Error>
-where
-    F: FnMut(&[(Name<'src>, (PredicateUsize, PredicateUsize))]) -> Result<Option<O>, Error>,
-{
-    use ErrorKind::UndefinedType;
-
-    fn _has_collition<'parent, 'src>(
-        args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
-        iterators: &[(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
-    ) -> bool {
-        for i in 0..iterators.len() {
-            for j in 0..iterators.len() {
-                if args[i].1 .1 == args[j].1 .1 && i != j && iterators[i].0 == iterators[j].0 {
+/// Permutates over all possible states given a closure to generate an iterator at a given position
+/// as well as a closure to generate optional value or error.
+/// The function will terminate if an error is generated, or collect all Some(values) into a vector. 
+pub fn permutate<G, F, I, O, II>(pos_size:usize, pos_to_iter:G, mut f:F) -> Result<Vec<O>, Error>
+where 
+    G:Fn(usize) -> II,
+    F:for <'b> FnMut(&'b [I]) -> Result<Option<O>, Error>,
+    I: PartialEq,
+    II: IntoIterator<Item = I> {
+    fn _has_collition<I, II>(
+        state: &[I],
+        _iterators: &[II],
+    ) -> bool where I:PartialEq, II:IntoIterator<Item = I>  {
+        for i in 0..state.len() {
+            for j in 0..state.len() {
+                if state[i] == state[j] && i != j { //&& iterators[i] == iterators[j] {
                     return true;
                 }
             }
         }
         false
     }
-    /// Call the next iterator at the right position.
-    /// If you think about converting binary to decimal:
-    /// Position == 0 is the least significant iterator
-    /// Position == iterators.len()-1 is the most significant iterator.
-    /// Except binary bit can only be 1 or 0, and our iterator bits
-    /// can go for however many objects of that type there are.
-    /// # Arguments:
-    /// * `type_to_objects` - map of type names to vector of world objects of that type
-    /// * `iterators` - iterators over object vectors in `type_to_objects` map.
-    /// * `args` - "output" vector that's populated by world object permutations each
-    /// time this function is called.
-    /// # Return:
-    /// Returns false when it's impossible to iterate more, true when we can keep going.
-    fn _args_iter<'parent, 'src>(
-        type_to_objects: &'parent HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
-        iterators: &mut [(&'src str, Iter<'parent, (PredicateUsize, PredicateUsize)>)],
-        args: &mut [(Name<'src>, (PredicateUsize, PredicateUsize))],
-        pos: usize,
-    ) -> bool {
-        if let Some(arg) = iterators[pos].1.next() {
-            args[pos].1 = *arg;
-            if pos == 0 && _has_collition(args, iterators) {
-                _args_iter(type_to_objects, iterators, args, pos)
+    fn _permutate_recurse<'a, I, II, IT, G>(iterators:&'a mut[IT], state:&'a mut [I], pos:usize, pos_to_iter:&'a G) -> bool 
+    where G:Fn(usize) -> II, 
+    I:PartialEq, 
+    IT: Iterator<Item = I>,
+    II:IntoIterator<Item = I, IntoIter = IT> {
+        if let Some(value) = iterators[pos].next() {
+            state[pos] = value;
+            if pos == 0 && _has_collition(state, iterators) {
+                _permutate_recurse(iterators, state, pos, pos_to_iter)
             } else {
                 true
             }
             // _no_collisions(type_to_objects, args, iterators, pos)
         } else if pos + 1 < iterators.len() {
-            let kind = iterators[pos].0;
-            if let Some(vec) = type_to_objects.get(kind) {
-                iterators[pos].1 = vec.iter();
-                if let Some(arg) = iterators[pos].1.next() {
-                    args[pos].1 = *arg;
-                }
+            iterators[pos] = pos_to_iter(pos).into_iter();
+            if let Some(value) = iterators[pos].next() {
+                state[pos] = value;
             }
-            let r = _args_iter(type_to_objects, iterators, args, pos + 1);
-            if r && pos == 0 && _has_collition(args, iterators) {
-                _args_iter(type_to_objects, iterators, args, pos)
+            let r = _permutate_recurse(iterators, state, pos + 1, pos_to_iter);
+            if r && pos == 0 && _has_collition(state, iterators) {
+                _permutate_recurse(iterators, state, pos, pos_to_iter)
             } else {
                 r
             }
@@ -402,79 +392,39 @@ where
             false
         }
     }
-
-    let mut iterators = Vec::new();
-    let mut args = Vec::new();
-    // We need to create `objects_vec.len()`` many args - one per object of this type.
-    // First, create an iterator per argument type
-    for List { items, kind } in list {
-        match kind {
-            Type::Exact(kind) => {
-                if let Some(objects_vec) = type_to_objects.get(kind.1) {
-                    for item in items {
-                        iterators.push((kind.1, objects_vec.iter()));
-                        if let Some(next) = iterators.last_mut().unwrap().1.next() {
-                            args.push((*item, *next));
-                        } else {
-                            // Not enough objects to populate this list
-                            todo!()
-                        }
-                    }
-                } else {
-                    return Err(Error {
-                        // input: None,
-                        kind: UndefinedType,
-                        chain: None,
-                        span: kind.0,
-                    });
-                }
-            }
-            Type::None => {
-                let objects_vec = type_to_objects.get("object").unwrap();
-                for item in items {
-                    iterators.push(("object", objects_vec.iter()));
-                    if let Some(next) = iterators.last_mut().unwrap().1.next() {
-                        args.push((*item, *next));
-                    } else {
-                        // Not enough objects to populate this list
-                        todo!()
-                    }
-                }
-            }
-            Type::Either(_) => todo!(),
-        }
+    let mut iterators = Vec::with_capacity(pos_size);
+    let mut state:Vec<I> = Vec::with_capacity(pos_size);
+    for pos in 0..pos_size {
+        iterators.push(pos_to_iter(pos).into_iter());
+        if let Some(next) = iterators.last_mut().unwrap().next() {
+            state.push(next);
+        } // else - not enough objects to fill the state.
     }
-    // Itereate until the most significant iterator is done, calling closure over populated args
-    let r = if _has_collition(&args, &iterators) {
-        _args_iter(
-            type_to_objects,
-            iterators.as_mut_slice(),
-            args.as_mut_slice(),
-            0,
-        )
+    let r = if _has_collition(&state, &iterators) {
+        _permutate_recurse(&mut iterators, &mut state, 0, &pos_to_iter)
     } else {
         true
     };
-    let mut result = if let Some(v) = f(args.as_slice())? {
+    let mut result = if let Some(v) = f(state.as_slice())? {
         vec![v]
     } else {
         Vec::new()
     };
 
-    if !r {
-        return Ok(result);
-    }
-    while _args_iter(
-        type_to_objects,
-        iterators.as_mut_slice(),
-        args.as_mut_slice(),
+    if !r { return Ok(result) }
+
+    while _permutate_recurse(
+        &mut iterators,
+        &mut state,
         0,
+        &pos_to_iter
     ) {
-        if let Some(v) = f(args.as_slice())? {
+        if let Some(v) = f(state.as_slice())? {
             result.push(v);
         }
     }
     Ok(result)
+
 }
 
 #[cfg(test)]
@@ -514,18 +464,30 @@ pub mod tests {
 
     #[test]
     fn test_permutations() {
-        let type_to_objects = HashMap::from([("object", vec![(0, 0), (0, 1), (0, 2), (0, 3)])]);
-        let list = vec![List {
+        let type_to_objects = HashMap::from([(0, vec![0, 1, 2, 3])]); 
+        let type_id_map = HashMap::new();
+        let mut maps = Maps::new();
+        maps.type_to_objects_map = type_to_objects;
+        maps.type_id_map = type_id_map;
+        let list: TypedList = vec![List {
             items: vec![
                 Name::new(0..0, "var1"),
                 Name::new(0..0, "var2"),
                 Name::new(0..0, "var3"),
             ],
             kind: Type::None,
-        }];
-        let result = for_all_type_object_permutations(&type_to_objects, &list, |args| {
+        }].into();
+        let pos_size = list.len();
+        let result = permutate(pos_size, 
+        |pos:usize| {
+            // let name = list.get_name(pos);
+            let kind:u16 = list.get_type(pos).to_id(&maps);
+            maps.type_to_objects_map.get(&kind).unwrap().iter().copied()
+            // iter.map(move |id| (name, *id))
+        }, 
+        |args| {
             assert_eq!(args.len(), 3);
-            Ok(Some((args[0].1 .1, args[1].1 .1, args[2].1 .1)))
+            Ok(Some((args[0], args[1], args[2])))
         })
         .unwrap();
         assert_eq!(
@@ -600,6 +562,14 @@ pub mod tests {
     }
 
     #[test]
+    fn test_constrained_permutation() {
+        let n = vec![1, 2];
+        assert_eq!(permutate(3, |_| n.iter().copied(), |args| {
+            Ok(Some(args.to_owned()))
+        }), Ok(vec![vec![1, 1, 2]]))
+    }
+
+    #[test]
     #[ignore = "New compiler has undeterministic memory mapping. This test fails half-the time."]
     fn test_action() {
         use Instruction::*;
@@ -613,7 +583,7 @@ pub mod tests {
             problem.actions[0],
             CompiledAction {
                 domain_action_idx: 0,
-                args: vec![(0, 0), (0, 1)], // b a
+                args: vec![0, 1], // b a
                 precondition: vec![ReadState(1), ReadState(0), And(2)],
                 effect: vec![Not, SetState(1), Not, SetState(1)],
                 // action_graph: ActionGraph { priority: vec![] },
@@ -627,11 +597,13 @@ pub mod tests {
         let instructions = vec![ReadState(0), Not, ReadState(1), And(2)];
         let mut state = vec![false, true];
         let mut functions = vec![0];
-        assert_eq!(instructions.run(&state, &functions), true);
+        let mut state_stack = Vec::with_capacity(10);
+        let mut function_stack = Vec::with_capacity(10);
+        assert_eq!(instructions.run(&state, &functions, &mut state_stack, &mut function_stack), true);
         let instructions = vec![ReadState(0), ReadState(1), And(2)];
-        assert_eq!(instructions.run(&state, &functions), false);
+        assert_eq!(instructions.run(&state, &functions, &mut state_stack, &mut function_stack), false);
         let instructions = vec![ReadState(0), SetState(1)];
-        instructions.run_mut(&mut state, &mut functions);
+        instructions.run_mut(&mut state, &mut functions, &mut state_stack, &mut function_stack);
         assert_eq!(state[0], false);
         assert_eq!(state[1], false);
     }

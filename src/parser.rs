@@ -1,12 +1,14 @@
 pub mod ast;
 mod input;
 
+use std::path::PathBuf;
+
 use crate::{Error, ErrorKind};
 
 use ast::Requirement::*;
 use enumset::{enum_set, EnumSet};
 
-use ast::{name::Name, span::*, *};
+use ast::{name::Name, span::*, r#type::Type, *};
 
 pub use input::Input;
 
@@ -14,7 +16,7 @@ use nom::{
     self,
     branch::alt,
     bytes::complete::is_not,
-    character::complete::{alpha1, digit0, digit1, multispace0},
+    character::complete::{alpha1, digit0, digit1, multispace0, multispace1},
     combinator::{cut, map, opt, recognize, value},
     multi::{fold_many1, many0},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
@@ -96,11 +98,10 @@ where
 
 #[inline]
 fn ignore<'src>(input: Input<'src>) -> IResult<()> {
-    value(
-        (),
-        multispace0
-            .and(opt(pair(char(';'), is_not("\n"))))
-            .and(multispace0),
+    value((), many0(alt((
+            value((), multispace1),
+            value((), pair(pair(char(';'), is_not("\n")), multispace0)),
+    )))
     )(input)
 }
 
@@ -225,13 +226,7 @@ fn pddl_anyletter(input: Input) -> IResult<Input> {
 ///     actions:vec![]}))
 /// ```
 pub fn parse_domain<'src>(src: &'src str) -> Result<Domain<'src>, Vec<Error>> {
-    let input = Input {
-        // filename,
-        src,
-        is_problem: false,
-        input_pos: 0,
-        requirements: EnumSet::EMPTY,
-    };
+    let input = Input::new(false, src);
     match map(
         parens(tuple((
             tag("define"),
@@ -317,7 +312,7 @@ fn require_key(input: Input) -> IResult<Requirement> {
 }
 
 #[inline]
-fn types_def(input: Input) -> IResult<Vec<List>> {
+fn types_def(input: Input) -> IResult<TypedList> {
     parens(preceded(
         check_requirements(tag(":types"), enum_set!(Typing), enum_set!()),
         cut(typed_list(name)),
@@ -325,7 +320,7 @@ fn types_def(input: Input) -> IResult<Vec<List>> {
 }
 
 #[inline]
-fn constants_def(input: Input) -> IResult<Vec<List>> {
+fn constants_def(input: Input) -> IResult<TypedList> {
     parens(preceded(tag(":constants"), cut(typed_list(name))))(input)
 }
 
@@ -430,13 +425,13 @@ fn structure_def(input: Input) -> IResult<Action> {
 }
 
 #[inline]
-fn typed_list<'src, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<Vec<List<'src>>>
+fn typed_list<'src, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<TypedList<'src>>
 where
     G: FnMut(Input<'src>) -> IResult<Name<'src>> + Copy,
 {
     move |input| {
         alt((
-            many1(
+            map(many1(
                 map(
                     separated_pair(
                         many1(parser, "name or variable"),
@@ -446,19 +441,19 @@ where
                     |(items, kind)| List { items, kind },
                 ),
                 "typed list",
-            ),
-            many1(
+            ), |v| v.into()),
+            map(many1(
                 map(many0(parser), |items| List {
                     items,
                     kind: Type::None,
                 }),
                 "list",
-            ),
+            ), |v| v.into()),
             map(many0(parser), |items| {
                 vec![List {
                     items,
                     kind: Type::None,
-                }]
+                }].into()
             }),
         ))(input)
         .map_err(err_name(ErrorKind::TypedList))
@@ -604,7 +599,7 @@ use name as action_symbol;
 #[inline]
 fn literal<'src, O2, G>(parser: G) -> impl FnMut(Input<'src>) -> IResult<NegativeFormula<O2>>
 where
-    O2: std::fmt::Display + 'src,
+    O2: 'src,
     G: Copy + FnMut(Input<'src>) -> IResult<O2>,
 {
     move |i| {
@@ -812,6 +807,8 @@ fn durative_action_def(input: Input) -> IResult<DurativeAction> {
 }
 
 use name as da_symbol;
+
+use self::ast::{atomic_formula::{NegativeFormula, AtomicFormula}, term::{Term, FunctionTerm}, list::{TypedList, List}};
 
 #[inline]
 fn da_gd(input: Input) -> IResult<DurationGD> {
@@ -1100,7 +1097,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic() {
+    fn test_pddl_anyletter() {
         assert_eq!(
             pddl_anyletter(Input::new(false, "H_ i")),
             Ok((
@@ -1114,6 +1111,20 @@ mod tests {
                 Input::new(false, "H_")
             ))
         );
+    }
+    #[test]
+    fn test_ignore() {
+        assert_eq!(ignore(Input::new(false, " ")),
+            Ok((Input {
+                // filename: None,
+                src: "",
+                is_problem: false,
+                input_pos: 1,
+                requirements: EnumSet::EMPTY
+            }, ())));
+    }
+    #[test]
+    fn test_name() {
         assert_eq!(
             name(Input::new(true, "He-l_lo world")),
             Ok((
@@ -1127,6 +1138,9 @@ mod tests {
                 Name::new(0..7, "He-l_lo")
             ))
         );
+    }
+    #[test]
+    fn test_pddl_name_span() {
         assert_eq!(
             name(Input::new(false, "He-l_lo world")).unwrap().1 .0,
             (0..7).into()
@@ -1142,6 +1156,9 @@ mod tests {
                 span
             }))
         );
+    }
+    #[test]
+    fn test_pddl_variable() {
         assert_eq!(
             variable(Input::new(false, "?test me")),
             Ok((
@@ -1155,6 +1172,9 @@ mod tests {
                 Name::new(0..5, "test")
             ))
         );
+    }
+    #[test]
+    fn test_pddl_parens_with_comment() {
         assert_eq!(
             parens(name)(Input::new(false, "(test;comment\n)")),
             Ok((
@@ -1168,7 +1188,9 @@ mod tests {
                 Name::new(1..5, "test")
             ))
         );
-
+    }
+    #[test]
+    fn test_pddl_name_var_pair() {
         assert_eq!(
             pair(name, variable)(Input::new(false, "hello ?world")),
             Ok((
@@ -1182,7 +1204,9 @@ mod tests {
                 (Name::new(0..5, "hello"), Name::new(6..12, "world"))
             ))
         );
-
+    }
+    #[test]
+    fn test_pddl_term() {
         assert_eq!(
             term(Input {
                 // filename: None,
@@ -1205,6 +1229,9 @@ mod tests {
                 })
             ))
         );
+    }
+    #[test]
+    fn test_pddl_term_span() {
         assert_eq!(
             term(Input {
                 is_problem: false,
@@ -1217,6 +1244,9 @@ mod tests {
             .span(),
             (1..10).into()
         );
+    }
+    #[test]
+    fn test_pddl_term_error() {
         let mut span: Span = (0..13).into();
         span.is_problem = true;
         let test = Error {
@@ -1233,6 +1263,9 @@ mod tests {
             term(Input::new(true, "(test ?one)  ")),
             Err(nom::Err::Error(test))
         );
+    }
+    #[test]
+    fn test_pddl_var_term() {
         assert_eq!(
             term(Input::new(false, "?hello")),
             Ok((
@@ -1245,6 +1278,9 @@ mod tests {
                 Term::Variable(Name::new(0..6, "hello"))
             ))
         );
+    }
+    #[test]
+    fn test_pddl_typed_list() {
         assert_eq!(
             typed_list(name)(Input {
                 is_problem: false,
@@ -1262,7 +1298,7 @@ mod tests {
                 vec![List {
                     items: vec![Name::new(0..3, "one"), Name::new(4..7, "two")],
                     kind: Type::Exact(Name::new(10..16, "object"))
-                }]
+                }].into()
             ))
         );
         assert_eq!(
@@ -1277,7 +1313,7 @@ mod tests {
                 vec![List {
                     items: vec![Name::new(0..3, "one"), Name::new(4..7, "two")],
                     kind: Type::None
-                }]
+                }].into()
             ))
         );
         assert_eq!(
@@ -1292,9 +1328,12 @@ mod tests {
                 vec![List {
                     items: vec![Name::new(0..3, "a1")],
                     kind: Type::None
-                }]
+                }].into()
             ))
         );
+    }
+    #[test]
+    fn test_pddl_atomic_f_skeleton() {
         assert_eq!(
             atomic_function_skeleton(Input::new(false, "(testing ?left ?right)")),
             Ok((
@@ -1309,7 +1348,7 @@ mod tests {
                     variables: vec![List {
                         items: vec![Name::new(9..14, "left"), Name::new(15..21, "right")],
                         kind: Type::None
-                    }]
+                    }].into()
                 }
             ))
         )
@@ -1329,7 +1368,7 @@ mod tests {
                 vec![List {
                     items: vec![Name::new(0..4, "one"), Name::new(5..9, "two")],
                     kind: Type::None
-                }]
+                }].into()
             ))
         );
     }

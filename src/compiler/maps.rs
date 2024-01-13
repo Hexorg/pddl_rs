@@ -3,33 +3,70 @@ use std::collections::HashMap;
 use enumset::EnumSet;
 
 use super::{span::Span, AtomicFormula, Domain, List, Name, PredicateUsize, Problem, Type};
-use crate::{Error, ErrorKind, Requirement};
+use crate::{Error, ErrorKind::{MissmatchedDomain, DuplicateType, DuplicateObject, DuplicatePredicate, FirstDefinedHere, UndefinedType}, Requirement, parser::ast::AtomicFSkeleton};
 
 /// Logical structures for compiling PDDL problems.
 #[derive(Debug, PartialEq)]
 pub struct Maps<'src> {
     /// Domain and problem requirements
     pub requirements: EnumSet<Requirement>,
-    /// Type inheritance tree. Everything should end up being an object.
-    pub type_tree: HashMap<&'src str, Name<'src>>,
-    /// Source code position mapping of where types are declared.
-    pub type_src_pos: HashMap<&'src str, Span>,
+    /// Name of type to integer identifying it. Type 0 is reserved for "object".
+    pub type_id_map: HashMap<&'src str, PredicateUsize>,
+    /// integer identifying a type to the type's name. Type 0 is reserved for "object".
+    pub id_type_map: Vec<Name<'src>>,
+    /// Type inheritance tree. Top-most value is 0 - "object" type
+    pub type_tree: HashMap<PredicateUsize, PredicateUsize>,
+    /// object name to integer identifying it
+    pub object_id_map: HashMap<&'src str, PredicateUsize>,
+    /// integer identifying an object to its type
+    pub id_object_map: Vec<Name<'src>>,
     /// Problem object map to Domain type.
-    pub object_to_type_map: HashMap<&'src str, Name<'src>>,
-    /// Domain type map to vector of objects. Note: `"object"` type must list all
-    /// problem objects.
-    pub type_to_objects_map: HashMap<&'src str, Vec<(PredicateUsize, PredicateUsize)>>,
-    /// Source code position mapping of where problem objects are declared.
-    pub object_src_pos: HashMap<&'src str, Span>,
-    /// Mapping a memory bit offset to predicate representing it. Used in `Vec<`[`Instruction`]`>::decomp()`
-    pub memory_map: Vec<AtomicFormula<'src, Name<'src>>>,
+    pub object_to_type_map: HashMap<PredicateUsize, PredicateUsize>,
+    /// Domain type map to vector of objects. Note: all objects are just `0..self.id_object_map.len()`
+    pub type_to_objects_map: HashMap<PredicateUsize, Vec<PredicateUsize>>,
+    /// Name of predicate to integer identifying it
+    pub predicate_id_map: HashMap<&'src str, PredicateUsize>,
+    /// Integer identifying a predicate to its name
+    pub id_predicate_map: Vec<Name<'src>>,
+
+    // / Mapping a memory bit offset to predicate representing it. Used in `Vec<`[`Instruction`]`>::decomp()`
+    // pub memory_map: Vec<AtomicFormula<'src, Name<'src>>>,
     // /// Mapping of argument vectors to compiled actions that use them
     // pub args_map: Vec<HashMap<Name<'src>, (PredicateUsize, PredicateUsize)>>,
 }
 
+impl<'src> Maps<'src> {
+    pub fn new() -> Self {
+        Self { requirements: EnumSet::new(), 
+            type_id_map: HashMap::new(),
+            id_type_map: Vec::new(),
+            type_tree: HashMap::new(), 
+            object_id_map: HashMap::new(),
+            id_object_map: Vec::new(), 
+            object_to_type_map: HashMap::new(), 
+            type_to_objects_map: HashMap::new(), 
+            predicate_id_map: HashMap::new(),
+            id_predicate_map: Vec::new(),
+            // memory_map: Vec::new()
+         }
+    }
+
+    pub fn is_subtype(&self, mut current:PredicateUsize, parent:PredicateUsize) -> bool {
+        if current == parent {
+            return true;
+        }
+        while let Some(next) = self.type_tree.get(&current) {
+            if *next == parent {
+                return true;
+            }
+            current = *next
+        }
+        false
+    }
+}
+
 /// Perform basic sanity checks like if the problem's domain match domain name
 pub fn validate_problem<'src>(domain: &Domain<'src>, problem: &Problem<'src>) -> Result<(), Error> {
-    use ErrorKind::*;
     if problem.domain.1 != domain.name.1 {
         return Err(Error {
             // input: None,
@@ -49,136 +86,148 @@ pub fn validate_problem<'src>(domain: &Domain<'src>, problem: &Problem<'src>) ->
 /// * `problem` - PDDL Problem
 pub fn map_objects<'src>(
     domain: &Domain<'src>,
-    problem: &'src Problem<'src>,
+    problem: &Problem<'src>,
 ) -> Result<Maps<'src>, Error> {
     let requirements = domain.requirements | problem.requirements;
+    let mut type_id_map =  HashMap::new();
+    let mut id_type_map = Vec::new();
     let mut type_tree = HashMap::new();
-    let mut type_src_pos = HashMap::new();
+    let mut object_id_map = HashMap::new();
+    let mut id_object_map:Vec<Name<'src>> = Vec::new();
+    let mut object_to_type_map = HashMap::new();
+    let mut type_to_objects_map = HashMap::new();
+    let mut predicate_id_map = HashMap::new();
+    let mut id_predicate_map:Vec<Name<'src>> = Vec::new();
+
+    type_id_map.insert("object", 0);
+    id_type_map.push(Name::new(0..0, "object"));
+    type_to_objects_map.insert(0, Vec::new());
+
     // Iterate over types and build the type tree
     for List { items, kind } in &domain.types {
         if let Type::Exact(kind) = kind {
+            let kind_idx = if let Some(kind_idx) = type_id_map.get(kind.1).copied() {
+                kind_idx
+            } else {
+                let kind_idx = type_id_map.len() as PredicateUsize;
+                type_id_map.insert(kind.1, kind_idx);
+                id_type_map.push(*kind);
+                kind_idx
+            };
             for item in items {
-                type_src_pos.insert(item.1, item.0.clone());
-                type_tree.insert(item.1, kind.to_owned());
+                let idx = id_type_map.len() as PredicateUsize;
+                if let Some(duplicate_idx) = type_id_map.insert(item.1, idx) {
+                    let duplicate_span = id_type_map[duplicate_idx as usize].0;
+                    return Err(Error{span:item.0, kind:DuplicateType, chain:Some(Box::new(Error{span:duplicate_span, kind:FirstDefinedHere, chain:None}))})
+                }
+                id_type_map.push(*item);
+                type_tree.insert(idx, kind_idx);
             }
         } else {
             todo!()
         }
     }
-    let mut object_to_type_map = HashMap::new();
-    let mut type_to_objects_map = HashMap::new();
-    let mut object_src_pos = HashMap::new();
-    type_to_objects_map.insert("object", Vec::new());
+
+    for AtomicFSkeleton{name, ..} in &domain.predicates {
+        let predicate_idx = id_predicate_map.len() as PredicateUsize;
+        if let Some(duplicate_idx) = predicate_id_map.insert(name.1, predicate_idx) {
+            let duplicate_span = id_predicate_map[duplicate_idx as usize].0;
+            return Err(Error{span:name.0, kind:DuplicatePredicate, chain:Some(Box::new(Error{span:duplicate_span, kind:FirstDefinedHere, chain:None}))});
+        }
+        id_predicate_map.push(*name);
+    }
+
     // Iterate over objects and build a Object to Type and Type to Object maps
-    for (list_idx, List { items, kind }) in problem.objects.iter().enumerate() {
-        let list_idx = list_idx as u16;
-        match kind {
-            Type::Exact(kind) => {
-                for (item_idx, item) in items.iter().enumerate() {
-                    let item_idx = item_idx as u16;
-                    object_src_pos.insert(item.1, item.0.clone());
-                    object_to_type_map.insert(item.1, kind.to_owned());
-                    let mut type_name = kind.1;
-                    while let Some(parent_type) = type_tree.get(type_name) {
-                        if type_to_objects_map
-                            .get_mut(type_name)
-                            .and_then(|vec: &mut Vec<(u16, u16)>| {
-                                Some(vec.push((list_idx, item_idx)))
-                            })
-                            .is_none()
-                        {
-                            type_to_objects_map.insert(type_name, vec![(list_idx, item_idx)]);
-                        }
-                        type_name = parent_type.1;
-                    }
-                    type_to_objects_map
-                        .get_mut("object")
-                        .and_then(|vec: &mut Vec<(u16, u16)>| {
-                            Some(vec.extend((0..items.len()).map(|i| (list_idx, i as u16))))
-                        });
+    for List { items, kind } in &problem.objects {
+        for item in items {
+            let object_idx = id_object_map.len() as PredicateUsize;
+            if let Some(duplicate_idx) = object_id_map.insert(item.1, object_idx) {
+                let duplicate_span = id_object_map[duplicate_idx as usize].0;
+                return Err(Error{span:item.0, kind:DuplicateObject, chain:Some(Box::new(Error{span:duplicate_span, kind:FirstDefinedHere, chain:None}))});
+            }
+            id_object_map.push(*item);
+
+            let mut kind_id = match kind {
+                Type::None => 0,
+                Type::Either(_) => todo!(),
+                Type::Exact(kind) => if let Some(idx) = type_id_map.get(kind.1) { *idx } else { return Err(Error{span:kind.0, kind:UndefinedType, chain:None}) },
+            };
+
+            object_to_type_map.insert(object_idx, kind_id);
+
+            loop {
+                if type_to_objects_map
+                .get_mut(&kind_id)
+                .and_then(|vec: &mut Vec<PredicateUsize>| {
+                    Some(vec.push(object_idx))
+                })
+                .is_none()
+                {
+                    type_to_objects_map.insert(kind_id, vec![object_idx]);
+                }
+                if let Some(parent_type_id) = type_tree.get(&kind_id) {
+                    kind_id = *parent_type_id;
+                } else {
+                    break;
                 }
             }
-            Type::None => {
-                object_src_pos.extend(items.iter().map(|i| (i.1, i.0.clone())));
-                type_to_objects_map
-                    .get_mut("object")
-                    .and_then(|vec: &mut Vec<(u16, u16)>| {
-                        Some(vec.extend((0..items.len()).map(|i| (list_idx, i as u16))))
-                    });
-            }
-            Type::Either(_) => todo!(),
         }
     }
     Ok(Maps {
         requirements,
+        type_id_map,
+        id_type_map,
         type_tree,
-        type_src_pos,
+        object_id_map,
+        id_object_map,
         object_to_type_map,
         type_to_objects_map,
-        object_src_pos,
-        memory_map: Vec::new(),
-        // args_map: Vec::new(),
+        predicate_id_map,
+        id_predicate_map
     })
 }
 
-// fn digitize_names<'src, 'ast>(
-//     compiler: &Compiler<'ast, 'src>,
-//     context: &mut Context<'src>
-// ) {
-//     let mut predicate_id_map:HashMap<&'src str, PredicateUsize> = HashMap::new();
-//     let mut id_predicate_map:Vec<Name<'src>> = Vec::new();
-//     let mut type_id_map:HashMap<Type<'src>, PredicateUsize> = HashMap::new();
-//     let mut id_type_map:Vec<Type<'src>> = Vec::new();
-//     let mut object_id_map:HashMap<&'src str, StateUsize> = HashMap::new();
-//     let mut id_object_map:Vec<Name<'src>> = Vec::new();
-//     let mut type_tree_map:HashMap<PredicateUsize, PredicateUsize> = HashMap::new();
-//     for AtomicFSkeleton { name, variables } in compiler.domain.predicates {
-//         let id = predicate_id_map.len() as PredicateUsize;
-//         if predicate_id_map.insert(name.1, id).is_some() {
-//             context.errors.push(Error { span: name.0, kind:RedefinedPredicate, chain:None })
-//         } else {
-//             if id_predicate_map.len() != id as usize { panic!("id to predicate and predicate to id maps diverged.")}
-//             id_predicate_map.push(name);
-
-//         }
-//     }
-//     type_id_map.insert(Type::Exact(Name::new(0..0, "object")), 0);
-//     for List { items, kind } in compiler.domain.types {
-//         let kind_id = if !type_id_map.contains_key(&kind) {
-//             let id = type_id_map.len() as PredicateUsize;
-//             type_id_map.insert(kind, id);
-//             if id_type_map.len() != id as usize { panic!("id to type and type to id maps diverged")}
-//             id_type_map.push(kind);
-//             id
-//         } else {
-//             *type_id_map.get(&kind).unwrap()
-//         };
-//         for item in items {
-//             let item = Type::Exact(item);
-//             let item_id = if !type_id_map.contains_key(&item) {
-//                 let id = type_id_map.len() as PredicateUsize;
-//                 type_id_map.insert(item, id);
-//                 if id_type_map.len() != id as usize { panic!("id to type and type to id maps diverged")}
-//                 id
-//             } else {
-//                 *type_id_map.get(&item).unwrap()
-//             };
-//             if type_tree_map.insert(item_id, kind_id).is_some() {
-//                 context.errors.push(Error { span: id_type_map[item_id as usize].span(), kind: RedefinedType, chain: None })
-//             }
-//         }
-//     }
-//     for List { items, kind } in compiler.problem.objects {
-//         for item in items {
-//             let id = object_id_map.len() as StateUsize;
-//             if object_id_map.insert(item.1, id).is_some() {
-//                 context.errors.push(Error { span: item.0, kind:RedefinedObject, chain:None })
-//             }
-//             if id_object_map.len() != id as usize { panic!("id to object and object to id maps diverged")}
-//             id_object_map.push(item);
-//         }
-//     }
-// }
-
 #[cfg(test)]
-mod test {}
+mod test {
+    use crate::{compiler::tests::TINY_SOURCES, ReportPrinter, parser::ast::name::Name, lib_tests::load_repo_pddl};
+
+    use super::map_objects;
+
+    #[test]
+    fn test_map() {
+        let (domain, problem) = TINY_SOURCES.parse();
+        let maps = match map_objects(&domain, &problem) {
+            Ok(maps) => maps,
+            Err(e) => Err(vec![e]).unwrap_or_print_report(&TINY_SOURCES)
+        };
+        assert_eq!(maps.object_id_map.get("a"), Some(&0));
+        assert_eq!(maps.object_id_map.get("b"), Some(&1));
+        assert_eq!(maps.object_id_map.get("c"), Some(&2));
+        assert_eq!(maps.id_object_map.len(), 3);
+        assert_eq!(maps.predicate_id_map.get("a"), Some(&0));
+        assert_eq!(maps.predicate_id_map.get("b"), Some(&1));
+        assert_eq!(maps.predicate_id_map.len(), 2);
+        assert_eq!(maps.type_to_objects_map.get(&0), Some(&vec![0, 1, 2]));
+        assert_eq!(maps.type_to_objects_map.len(), 1);
+        assert_eq!(maps.id_type_map.get(0), Some(&Name::new(0..0, "object")));
+        assert_eq!(maps.id_type_map.len(), 1)
+    }
+
+    #[test]
+    fn test_barman() {
+        let sources = load_repo_pddl(
+            "sample_problems/barman/domain.pddl",
+            "sample_problems/barman/problem_5_10_7.pddl",
+        );
+        let (domain, problem) = sources.parse();
+        println!("{:?}", domain.types);
+        let maps = match map_objects(&domain, &problem) {
+            Ok(maps) => maps,
+            Err(e) => Err(vec![e]).unwrap_or_print_report(&sources)
+        };
+        assert_eq!(maps.type_id_map.len(), 10);
+        assert_eq!(maps.type_id_map.get("container"), Some(&5));
+        assert_eq!(maps.type_to_objects_map.get(&5), Some(&vec![]))
+    }
+
+}

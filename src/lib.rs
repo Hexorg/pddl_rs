@@ -48,12 +48,12 @@ pub mod parser;
 pub mod search;
 
 use ariadne::Cache;
-use compiler::{compile_problem, parse_domain, parse_problem, CompiledProblem, Domain, Problem};
+use compiler::{compile_problem, CompiledProblem};
 // use compiler::{Span, Input};
 /// Used to represent domain requirements.
 pub use enumset::EnumSet;
-use parser::ast::span::Span;
-pub use parser::ast::{span::SpannedAst, Objects, Requirement};
+use parser::{ast::{span::Span}, parse_domain, parse_problem};
+pub use parser::ast::{span::SpannedAst, Requirement, Domain, Problem};
 use std::{ops::Range, path::PathBuf};
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -82,7 +82,15 @@ enum ErrorKind {
     // Compiler Errors
     MissmatchedDomain,
     UndefinedType,
+    UndefinedVariable,
+    UndefinedPredicate,
+    UndefinedObject,
     ExpectedName,
+    ExpectedVariable,
+    DuplicateType,
+    DuplicatePredicate,
+    DuplicateObject,
+    FirstDefinedHere,
     UnmetGoal,
     UnmetPredicate,
 }
@@ -157,8 +165,8 @@ impl Sources {
     }
 
     pub fn parse(&self) -> (Domain, Problem) {
-        let domain = parse_domain(&self.domain_src).unwrap_or_print_report(self);
-        let problem =
+        let mut domain = parse_domain(&self.domain_src).unwrap_or_print_report(self);
+        let mut problem =
             parse_problem(&self.problem_src, domain.requirements).unwrap_or_print_report(self);
         (domain, problem)
     }
@@ -167,11 +175,11 @@ impl Sources {
         &self,
         domain: &'ast Domain<'src>,
         problem: &'ast Problem<'src>,
-    ) -> CompiledProblem<'src>
+    ) -> CompiledProblem<'ast, 'src>
     where
         'ast: 'src,
     {
-        compile_problem(domain, problem).unwrap_or_print_report(self)
+        compile_problem(domain, problem, self.domain_path.clone(), self.problem_path.clone()).unwrap_or_print_report(self)
     }
 }
 
@@ -262,9 +270,17 @@ impl Error {
                 "Expected name, variable, or function term if :object-fluents is set.",
             ),
             FunctionTypedList => todo!(),
+            DuplicateType => label.with_message("Duplicate type."),
+            DuplicateObject => label.with_message("Duplicate object."),
+            DuplicatePredicate => label.with_message("Duplicate predicate."),
+            FirstDefinedHere => label.with_message("First defined here."),
             MissmatchedDomain => label.with_message(format!("Problem and Domain names missmatch.")),
-            ExpectedName => label.with_message("Expected Name"),
+            ExpectedName => label.with_message("Expected name."),
+            ExpectedVariable => label.with_message("Expected variable."),
             UndefinedType => label.with_message("Domain :types() does not declare this type."),
+            UndefinedVariable => label.with_message("Undefined variable."),
+            UndefinedPredicate => label.with_message("Undefined predicate."),
+            UndefinedObject => label.with_message("Undefined object."),
             UnmetGoal => label.with_message("Problem goal can not be met."),
             UnmetPredicate => label.with_message("Predicate is impossible to satisfy."),
         }
@@ -337,7 +353,7 @@ pub mod lib_tests {
             let domain = parse_domain(&sources.domain_src).unwrap_or_print_report(&sources);
             let problem = parse_problem(&sources.problem_src, domain.requirements)
                 .unwrap_or_print_report(&sources);
-            let _c_problem = compile_problem(&domain, &problem).unwrap_or_print_report(&sources);
+            let _c_problem = compile_problem(&domain, &problem, sources.domain_path.clone(), sources.problem_path.clone()).unwrap_or_print_report(&sources);
             // println!("At {:?}: {}.{} uses {} bits of memory and has {} actions.", optimizations, domain.name.1, problem.name.1, c_problem.memory_size, c_problem.actions.len());
         }
     }

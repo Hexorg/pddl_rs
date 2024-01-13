@@ -1,9 +1,11 @@
-use crate::{Error, ErrorKind::*};
+use std::path::PathBuf;
+
+use crate::{Error, ErrorKind::{UndefinedPredicate, UndefinedVariable, UndefinedObject, ExpectedName}, parser::ast::{atomic_formula::*, term::Term, list::TypedList}, SpannedAst};
 
 use super::{
-    for_all_type_object_permutations, maps::Maps, ASTActionUsize, AtomicFormula, BasicAction,
+    permutate, maps::{Maps, map_objects}, ASTActionUsize, AtomicFormula, BasicAction,
     CompiledAction, CompiledActionUsize, CompiledProblem, Domain, Effect, FluentExpression, Init,
-    Instruction, Name, NegativeFormula, PreconditionExpr, Problem, StateUsize, Term, GD,
+    Instruction, Name, PreconditionExpr, Problem, StateUsize, GD, action_graph::ActionGraph, PredicateUsize, domain::CompiledAtomicFormula, //action_plotter::plot_inertia_enables,
 };
 
 mod first_pass;
@@ -22,20 +24,20 @@ pub enum AstKind {
     Init,
 }
 
-pub enum ContextPass<'src> {
-    First(FirstPassContext<'src>),
-    Second(SecondPassContext<'src>),
+pub enum ContextPass {
+    First(FirstPassContext),
+    Second(SecondPassContext),
 }
 
-impl<'src> ContextPass<'src> {
-    pub fn unwrap_pass1_context(&mut self) -> &mut FirstPassContext<'src> {
+impl ContextPass {
+    pub fn unwrap_pass1_context(&mut self) -> &mut FirstPassContext {
         match self {
             ContextPass::First(data) => data,
             _ => panic!(),
         }
     }
 
-    pub fn unwrap_pass2_context(&mut self) -> &mut SecondPassContext<'src> {
+    pub fn unwrap_pass2_context(&mut self) -> &mut SecondPassContext {
         match self {
             ContextPass::Second(data) => data,
             _ => panic!(),
@@ -45,17 +47,17 @@ impl<'src> ContextPass<'src> {
 
 /// Gets passed to all AST visitors to keep track of inter-node state as we are
 /// traversing the Abstract Systax Tree
-pub struct Context<'src> {
+pub struct Context {
     pub errors: Vec<Error>,
     pub ast_kind: AstKind,
     pub is_negative: bool,
     pub domain_action_idx: ASTActionUsize,
     pub action_idx: CompiledActionUsize,
-    pub pass: ContextPass<'src>,
+    pub pass: ContextPass,
 }
 
-impl<'src> Context<'src> {
-    pub fn new(pass: ContextPass<'src>) -> Self {
+impl Context {
+    pub fn new(pass: ContextPass) -> Self {
         Self {
             errors: Vec::new(),
             ast_kind: AstKind::None,
@@ -65,7 +67,7 @@ impl<'src> Context<'src> {
             pass,
         }
     }
-    pub fn get_errors_or_data(self) -> Result<ContextPass<'src>, Vec<Error>> {
+    pub fn get_errors_or_data(self) -> Result<ContextPass, Vec<Error>> {
         if self.errors.len() > 0 {
             Err(self.errors)
         } else {
@@ -80,367 +82,439 @@ where
 {
     domain: &'ast Domain<'src>,
     problem: &'ast Problem<'src>,
+    domain_file_path: PathBuf,
+    problem_file_path: PathBuf,
     maps: Maps<'src>,
-    pass1_data: FirstPassContext<'src>,
+    pass1_data: FirstPassContext,
 }
 
 impl<'ast, 'src> Compiler<'ast, 'src> {
-    pub fn new(domain: &'ast Domain<'src>, problem: &'ast Problem<'src>, maps: Maps<'src>) -> Self {
+    pub fn new(domain: &'ast Domain<'src>, problem: &'ast Problem<'src>, domain_file_path: PathBuf,
+    problem_file_path: PathBuf) -> Self {
         Self {
             domain,
             problem,
-            maps,
-            pass1_data: FirstPassContext::new(domain.actions.len()),
+            domain_file_path, 
+            problem_file_path,
+            pass1_data: FirstPassContext::new(),
+            maps: Maps::new(),
         }
     }
-    pub fn compile(&mut self) -> Result<CompiledProblem<'src>, Vec<Error>> {
-        let mut context = Context::new(ContextPass::First(FirstPassContext::new(
-            self.domain.actions.len(),
-        )));
-        pass(self, &mut context);
+    pub fn compile(mut self) -> Result<CompiledProblem<'ast, 'src>, Vec<Error>> {
+        let maps = map_objects(self.domain, self.problem)?;
+        self.maps = maps;
+        let mut context = Context::new(ContextPass::First(FirstPassContext::new()));
+        self.pass(&mut context);
 
         if let ContextPass::First(pass1_data) = context.get_errors_or_data()? {
             self.pass1_data = pass1_data;
+            // self.pass1_data.inertia.constant_predicates = self.pass1_data.constant_predicate_idx.iter().copied().collect();
+            // self.pass1_data.inertia.constant_predicates.sort();
         }
-        let mut context = Context::new(ContextPass::Second(SecondPassContext::new(
-            std::mem::take(&mut self.pass1_data.inertia),
-        )));
-        pass(self, &mut context);
+        
+        let mut context = Context::new(ContextPass::Second(SecondPassContext::new()));
+        self.pass(&mut context);
 
         if let ContextPass::Second(pass2_data) = context.get_errors_or_data()? {
-            self.maps.memory_map = pass2_data.memory_map;
-            // self.maps.args_map = pass2_data.args_map;
-            Ok(pass2_data.compiled_problem)
+            let mut p = CompiledProblem {
+                memory_size: pass2_data.predicate_memory_map.len() as PredicateUsize,
+                constants_size: (self.pass1_data.true_predicates.len()
+                + self.pass1_data.false_predicates.len()) as StateUsize,
+                actions: pass2_data.actions,
+                domain_action_ranges: pass2_data.domain_action_ranges,
+                init: pass2_data.init,
+                goal: pass2_data.goal,
+                inertia: self.pass1_data.inertia,
+                constant_predicate_ids: self.pass1_data.constant_predicate_idx,
+                action_graph: ActionGraph::new(),
+                // domain_inertia: self.pass1_data.inertia,
+                // problem_inertia: pass2_data.problem_inertia,
+                domain: self.domain,
+                problem: self.problem,
+                maps: self.maps,
+            };
+            // let mut action_graph = ActionGraph::new();
+            // action_graph.apply_inertia(&p);
+            // p.action_graph = action_graph;
+            // plot_inertia_enables(self.domain, &p.inertia, &p.maps).unwrap();
+            Ok(p)
         } else {
             panic!("Context pass enum has changed in the middle of the pass.")
         }
     }
-}
 
-fn pass<'src, 'ast>(compiler: &Compiler<'ast, 'src>, context: &mut Context<'src>)
-where
-    'ast: 'src,
-{
-    if let Err(e) = match &context.pass {
-        ContextPass::First(..) => first_pass(compiler, context),
-        ContextPass::Second(..) => second_pass(compiler, context),
-    } {
-        context.errors.extend(e);
-    }
-}
-
-fn visit_init<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    init: &[Init<'src>],
-    context: &mut Context<'src>,
-) -> Result<(), Error> {
-    for init in init {
-        match init {
-            Init::AtomicFormula(formula) => {
-                visit_negative_name_formula(compiler, formula, context)?
-            }
-            Init::At(_, _) => todo!(),
-            Init::Equals(_, _) => todo!(),
-            Init::Is(_, _) => todo!(),
+    fn pass(&self, context: &mut Context)
+    {
+        if let Err(e) = match &context.pass {
+            ContextPass::First(..) => first_pass(self, context),
+            ContextPass::Second(..) => second_pass(self, context),
+        } {
+            context.errors.extend(e);
         }
     }
-    Ok(())
-}
 
-fn visit_all_actions<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    context: &mut Context<'src>,
-) -> Result<Vec<CompiledAction>, Error> {
-    let mut action_idx = 0;
-    let mut all_actions = Vec::new();
-    for (domain_action_idx, action) in compiler.domain.actions.iter().enumerate() {
-        context.domain_action_idx = domain_action_idx as ASTActionUsize;
-        let start_idx = all_actions.len() as CompiledActionUsize;
-        match action {
-            super::Action::Basic(action) => {
-                all_actions.extend(for_all_type_object_permutations(
-                    &compiler.maps.type_to_objects_map,
-                    &action.parameters,
-                    |args| {
-                        context.action_idx = action_idx;
-                        let r = visit_basic_action(compiler, action, args, context)?;
-                        if r.is_some() {
-                            action_idx += 1;
-                        }
-                        Ok(r)
+    fn visit_init(
+        &self,
+        init: &[Init<'src>],
+        context: &mut Context,
+    ) -> Result<(), Error> {
+        for init in init {
+            match init {
+                Init::AtomicFormula(formula) => {
+                    self.visit_negative_name_formula(formula, context)?
+                }
+                Init::At(_, _) => todo!(),
+                Init::Equals(_, _) => todo!(),
+                Init::Is(_, _) => todo!(),
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_all_actions(
+        &self,
+        context: &mut Context,
+    ) -> Result<Vec<CompiledAction>, Error> {
+        let mut action_idx = 0;
+        let mut all_actions = Vec::new();
+        for (domain_action_idx, action) in self.domain.actions.iter().enumerate() {
+            context.domain_action_idx = domain_action_idx as ASTActionUsize;
+            let start_idx = all_actions.len() as CompiledActionUsize;
+            match action {
+                super::Action::Basic(action) => {
+                    // println!("Looking at action {}({:?})", action.name.1, action.parameters);
+                    all_actions.extend(permutate(action.parameters.len(),
+                    |pos|  {
+                        let object_vec =self.maps.type_to_objects_map.get(&action.parameters.get_type(pos).to_id(&self.maps)).unwrap();
+                        // println!("Parameter position {} has type {} and it has {} objects: {:?}", pos, action.parameters.get_type(pos), object_vec.len(), object_vec);
+                        object_vec.iter().copied()
                     },
-                )?);
-            }
-            super::Action::Durative(_) => todo!(),
-            super::Action::Derived(_, _) => todo!(),
-        }
-        let end_idx = all_actions.len() as CompiledActionUsize;
-        if let ContextPass::Second(pass) = &mut context.pass {
-            pass.compiled_problem
-                .domain_action_ranges
-                .push(start_idx..end_idx);
-        }
-    }
-    Ok(all_actions)
-}
-
-fn visit_basic_action<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    action: &BasicAction<'src>,
-    args: &[(Name<'src>, (u16, u16))],
-    context: &mut Context<'src>,
-) -> Result<Option<CompiledAction>, Error> {
-    match context.pass {
-        ContextPass::First(..) => first_pass::visit_basic_action(compiler, action, args, context),
-        ContextPass::Second(..) => second_pass::visit_basic_action(compiler, action, args, context),
-    }
-}
-
-fn visit_effect<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    effect: &Effect<'src>,
-    args: &[(Name<'src>, (u16, u16))],
-    context: &mut Context<'src>,
-) -> Result<(), Error> {
-    match effect {
-        Effect::And(vec) => {
-            for effect in vec {
-                visit_effect(compiler, effect, args, context)?;
-            }
-            Ok(())
-        }
-        Effect::NegativeFormula(formula) => {
-            if !visit_negative_term_formula(compiler, formula, args, context)? {
-                panic!("Failed effect application")
-            }
-            Ok(())
-        }
-        Effect::Forall(_) => todo!(),
-        Effect::When(_) => todo!(),
-        Effect::AssignTerm(_, _) => todo!(),
-        Effect::AssignUndefined(_) => todo!(),
-        Effect::Assign(_, _) => todo!(),
-        Effect::ScaleUp(_, _) => todo!(),
-        Effect::ScaleDown(_, _) => todo!(),
-        Effect::Increase(fterm, fexp) => {
-            visit_fluent_expression(compiler, &fexp.1, context)?;
-            match context.pass {
-                ContextPass::Second(..) => {
-                    second_pass::increate_function_term(compiler, fterm, context)
+                        |args| {
+                            // println!("args: {:?}", args);
+                            // panic!();
+                            context.action_idx = action_idx;
+                            let r = self.visit_basic_action(action, args, context)?;
+                            if r.is_some() {
+                                action_idx += 1;
+                            }
+                            Ok(r)
+                        },
+                    )?);
                 }
-                _ => Ok(()),
+                super::Action::Durative(_) => todo!(),
+                super::Action::Derived(_, _) => todo!(),
+            }
+            let end_idx = all_actions.len() as CompiledActionUsize;
+            if let ContextPass::Second(pass) = &mut context.pass {
+                pass.domain_action_ranges
+                    .push(start_idx..end_idx);
             }
         }
-        Effect::Decrease(_, _) => todo!(),
+        Ok(all_actions)
     }
-}
 
-fn visit_fluent_expression<'src, 'ast>(
-    _compiler: &Compiler<'ast, 'src>,
-    fexp: &FluentExpression<'src>,
-    context: &mut Context<'src>,
-) -> Result<(), Error> {
-    match fexp {
-        FluentExpression::Number(i) => {
-            if let ContextPass::Second(pass) = &mut context.pass {
-                pass.instructions.push(Instruction::Push(*i));
+    fn visit_basic_action(
+        &self,
+        action: &'ast BasicAction<'src>,
+        args: &[PredicateUsize],
+        context: &mut Context,
+    ) -> Result<Option<CompiledAction>, Error> {
+        match context.pass {
+            ContextPass::First(..) => first_pass::visit_basic_action(self, action, args, context),
+            ContextPass::Second(..) => second_pass::visit_basic_action(self, action, args, context),
+        }
+    }
+
+    fn visit_effect(
+        &self,
+        effect: &'ast Effect<'src>,
+        args: &[PredicateUsize],
+        context: &mut Context,
+    ) -> Result<(), Error> {
+        match effect {
+            Effect::And(vec) => {
+                for effect in vec {
+                    self.visit_effect(effect, args, context)?;
+                }
                 Ok(())
-            } else {
+            }
+            Effect::NegativeFormula(formula) => {
+                if !self.visit_negative_term_formula( formula, args, context)? {
+                    panic!("Failed effect application")
+                }
                 Ok(())
             }
-        }
-        FluentExpression::Subtract(_) => todo!(),
-        FluentExpression::Negate(_) => todo!(),
-        FluentExpression::Divide(_) => todo!(),
-        FluentExpression::Add(_) => todo!(),
-        FluentExpression::Multiply(_) => todo!(),
-        FluentExpression::Function(_) => todo!(),
-    }
-}
-
-fn visit_negative_term_formula<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    formula: &NegativeFormula<'src, Term<'src>>,
-    args: &[(Name<'src>, (u16, u16))],
-    context: &mut Context<'src>,
-) -> Result<bool, Error> {
-    match formula {
-        NegativeFormula::Direct(formula) => {
-            visit_term_formula(compiler, formula, Some(args), context)
-        }
-        NegativeFormula::Not(formula) => {
-            let is_negative = context.is_negative;
-            context.is_negative = !is_negative;
-            if let ContextPass::Second(pass) = &mut context.pass {
-                pass.instructions.push(Instruction::Not);
+            Effect::Forall(_) => todo!(),
+            Effect::When(_) => todo!(),
+            Effect::AssignTerm(_, _) => todo!(),
+            Effect::AssignUndefined(_) => todo!(),
+            Effect::Assign(_, _) => todo!(),
+            Effect::ScaleUp(_, _) => todo!(),
+            Effect::ScaleDown(_, _) => todo!(),
+            Effect::Increase(fterm, fexp) => {
+                self.visit_fluent_expression(&fexp.1, context)?;
+                match context.pass {
+                    ContextPass::Second(..) => {
+                        second_pass::increate_function_term(self, fterm, context)
+                    }
+                    _ => Ok(()),
+                }
             }
-            let r = visit_term_formula(compiler, formula, Some(args), context);
-            context.is_negative = is_negative;
-            r
+            Effect::Decrease(_, _) => todo!(),
         }
     }
-}
 
-fn visit_negative_name_formula<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    formula: &NegativeFormula<'src, Name<'src>>,
-    context: &mut Context<'src>,
-) -> Result<(), Error> {
-    match formula {
-        NegativeFormula::Direct(formula) => visit_name_formula(compiler, formula, context),
-        NegativeFormula::Not(formula) => {
-            let is_negative = context.is_negative;
-            context.is_negative = !is_negative;
-            if let ContextPass::Second(pass) = &mut context.pass {
-                pass.instructions.push(Instruction::Not);
-            }
-            let r = visit_name_formula(compiler, formula, context);
-            context.is_negative = is_negative;
-            r
-        }
-    }
-}
-
-fn visit_term_formula<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    term_formula: &AtomicFormula<'src, Term<'src>>,
-    args: Option<&[(Name<'src>, (u16, u16))]>,
-    context: &mut Context<'src>,
-) -> Result<bool, Error> {
-    let formula = match term_formula.try_into() {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(args) = args {
-                term_formula.concrete(&compiler.problem.objects, args)
-            } else {
-                return Err(e);
-            }
-        }
-    };
-    match context.pass {
-        ContextPass::First(..) => {
-            first_pass::visit_term_formula(compiler, term_formula, args, context, formula)
-        }
-        ContextPass::Second(..) => {
-            second_pass::visit_term_formula(compiler, term_formula, args, context, formula)
-        }
-    }
-}
-
-fn visit_name_formula<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    formula: &AtomicFormula<'src, Name<'src>>,
-    context: &mut Context<'src>,
-) -> Result<(), Error> {
-    assert!(context.ast_kind == AstKind::Init);
-    match &mut context.pass {
-        ContextPass::First(pass) => {
-            if context.is_negative {
-                pass.false_predicates.insert(formula.clone());
-            } else {
-                pass.true_predicates.insert(formula.clone());
-            }
-        }
-        ContextPass::Second(pass) => {
-            if let Some(offset) = pass.predicate_memory_map.get(formula) {
-                pass.instructions.push(Instruction::SetState(*offset));
-            } else {
-                if compiler.pass1_data.true_predicates.contains(formula)
-                    || compiler.pass1_data.false_predicates.contains(formula)
-                {
-                    // nop
+    fn visit_fluent_expression(
+        &self,
+        fexp: &FluentExpression<'src>,
+        context: &mut Context,
+    ) -> Result<(), Error> {
+        match fexp {
+            FluentExpression::Number(i) => {
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    pass.instructions.push(Instruction::Push(*i));
+                    Ok(())
                 } else {
-                    panic!()
+                    Ok(())
                 }
+            }
+            FluentExpression::Subtract(_) => todo!(),
+            FluentExpression::Negate(_) => todo!(),
+            FluentExpression::Divide(_) => todo!(),
+            FluentExpression::Add(_) => todo!(),
+            FluentExpression::Multiply(_) => todo!(),
+            FluentExpression::Function(_) => todo!(),
+        }
+    }
+
+    fn visit_negative_term_formula(
+        &self,
+        formula: &'ast NegativeFormula<Term<'src>>,
+        args: &[PredicateUsize],
+        context: &mut Context,
+    ) -> Result<bool, Error> {
+        match formula {
+            NegativeFormula::Direct(formula) => {
+                self.visit_term_formula(formula, Some(args), context)
+            }
+            NegativeFormula::Not(formula) => {
+                let is_negative = context.is_negative;
+                context.is_negative = !is_negative;
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    pass.instructions.push(Instruction::Not);
+                }
+                let r = self.visit_term_formula(formula, Some(args), context);
+                context.is_negative = is_negative;
+                r
             }
         }
     }
-    Ok(())
-}
 
-fn visit_precondition<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    precondition: &PreconditionExpr<'src>,
-    args: Option<&[(Name<'src>, (u16, u16))]>,
-    context: &mut Context<'src>,
-) -> Result<bool, Error> {
-    match precondition {
-        PreconditionExpr::And(vec) => {
-            let mut accumulator = true;
-            let mut old_skipped_instructions = 0;
-            if let ContextPass::Second(pass) = &mut context.pass {
-                old_skipped_instructions = pass.skipped_instructions;
-                pass.skipped_instructions = 0;
-            }
-            for precondition in vec {
-                accumulator &= visit_precondition(compiler, precondition, args, context)?
-            }
-            if let ContextPass::Second(pass) = &mut context.pass {
-                if accumulator {
-                    let len = vec.len() as StateUsize - pass.skipped_instructions;
-                    if len > 1 {
-                        pass.instructions.push(Instruction::And(len))
-                    }
+    fn visit_negative_name_formula(
+        &self,
+        formula: &NegativeFormula<Name<'src>>,
+        context: &mut Context,
+    ) -> Result<(), Error> {
+        match formula {
+            NegativeFormula::Direct(formula) => self.visit_name_formula(formula, context),
+            NegativeFormula::Not(formula) => {
+                let is_negative = context.is_negative;
+                context.is_negative = !is_negative;
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    pass.instructions.push(Instruction::Not);
                 }
-                pass.skipped_instructions = old_skipped_instructions;
+                let r = self.visit_name_formula(formula, context);
+                context.is_negative = is_negative;
+                r
             }
-            Ok(accumulator)
         }
-
-        PreconditionExpr::Forall(_) => todo!(),
-        PreconditionExpr::Preference(_) => todo!(),
-        PreconditionExpr::GD(gd) => visit_gd(compiler, gd, args, context),
     }
-}
 
-fn visit_gd<'src, 'ast>(
-    compiler: &Compiler<'src, 'ast>,
-    gd: &GD<'src>,
-    args: Option<&[(Name<'src>, (u16, u16))]>,
-    context: &mut Context<'src>,
-) -> Result<bool, Error> {
-    match gd {
-        GD::AtomicFormula(formula) => visit_term_formula(compiler, formula, args, context),
-        GD::And(vec) => {
-            let mut accumulator = true;
-            let mut old_skipped_instructions = 0;
-            if let ContextPass::Second(pass) = &mut context.pass {
-                old_skipped_instructions = pass.skipped_instructions;
-                pass.skipped_instructions = 0;
+    fn compile_term_formula(&self, term_formula: &'ast AtomicFormula<'src, Term<'src>>, parameters:Option<&'ast TypedList<'src>>, args: Option<&[PredicateUsize]>) -> Result<CompiledAtomicFormula, Error> {
+        match term_formula {
+            AtomicFormula::Predicate(predicate, vars) => {
+                if let Some(predicate_idx) = self.maps.predicate_id_map.get(predicate.1) {
+                    let predicate_idx = *predicate_idx;
+                    let mut args_vec = Vec::with_capacity(vars.len());
+                    for var in vars.iter() {
+                        let var_idx = match var {
+                            Term::Variable(var_name) => 
+                            if let Some(args) = args {
+                                args[parameters.unwrap().find(|n| n.1 == var_name.1).unwrap() as usize]
+                            } else {
+                                panic!("Variable term formula has no provided args")
+                            }
+                            Term::Name(name) => if let Some(idx) = self.maps.object_id_map.get(name.1) {
+                                *idx
+                            } else {
+                                return Err(Error{span:name.0, kind:UndefinedObject, chain:None})
+                            },
+                            Term::Function(_) => todo!(),
+                        };
+                        args_vec.push(var_idx);
+                    }
+                    let compiled = CompiledAtomicFormula{predicate_idx, args:args_vec};
+                    // println!("Term formula: {:?} compiles to {}", term_formula, compiled.decompile(&self.maps));
+                    Ok(compiled)
+                } else {
+                    return Err(Error{span:predicate.0, kind:UndefinedPredicate, chain:None})
+                }
+            },
+            AtomicFormula::Equality(_, _) => todo!(),
+        }
+    }
+
+    fn visit_term_formula(
+        &self,
+        term_formula: &'ast AtomicFormula<'src, Term<'src>>,
+        args: Option<&[PredicateUsize]>,
+        context: &mut Context,
+    ) -> Result<bool, Error> {
+        let parameters = match &self.domain.actions[context.domain_action_idx as usize] {
+            crate::parser::ast::Action::Basic(ba) => &ba.parameters,
+            crate::parser::ast::Action::Durative(_) => todo!(),
+            crate::parser::ast::Action::Derived(_, _) => todo!(),
+        };
+        let formula = self.compile_term_formula(term_formula, Some(parameters), args)?;
+        match context.pass {
+            ContextPass::First(..) => {
+                first_pass::visit_term_formula(self, term_formula, args, context, formula)
             }
-            for gd in vec {
-                accumulator &= visit_gd(compiler, gd, args, context)?;
+            ContextPass::Second(..) => {
+                second_pass::visit_term_formula(self, term_formula, args, context, formula)
             }
-            if let ContextPass::Second(pass) = &mut context.pass {
-                if accumulator {
-                    let len = vec.len() as StateUsize - pass.skipped_instructions;
-                    if len > 1 {
-                        pass.instructions.push(Instruction::And(len))
+        }
+    }
+
+    fn visit_name_formula(
+        &self,
+        formula: &AtomicFormula<'src, Name<'src>>,
+        context: &mut Context,
+    ) -> Result<(), Error> {
+        assert!(context.ast_kind == AstKind::Init);
+
+        let c_formula = self.compile_term_formula(&formula.into(), None, None)?;
+        match &mut context.pass {
+            ContextPass::First(pass) => {
+                if context.ast_kind == AstKind::Init {
+                    pass.inertia.problem_init.insert(context.is_negative, c_formula.clone());
+                } else if context.ast_kind == AstKind::Goal {
+                    pass.inertia.problem_goal.insert(context.is_negative, c_formula.clone())
+                } else {
+                    return Err(Error{span:formula.span(), kind:ExpectedName, chain:None})
+                }
+                if context.is_negative {
+                    pass.false_predicates.insert(c_formula);
+                } else {
+                    pass.true_predicates.insert(c_formula);
+                }
+            }
+            ContextPass::Second(pass) => {
+                if let Some(offset) = pass.predicate_memory_map.get(&c_formula) {
+                    pass.instructions.push(Instruction::SetState(offset));
+                    // if context.is_negative {
+                    //     pass.problem_inertia.provides.negative.insert(formula.clone());
+                    // } else {
+                    //     pass.problem_inertia.provides.positive.insert(formula.clone());
+                    // }
+                } else {
+                    if self.pass1_data.true_predicates.contains(&c_formula)
+                        || self.pass1_data.false_predicates.contains(&c_formula)
+                    {
+                        // nop
+                    } else {
+                        panic!()
                     }
                 }
-                pass.skipped_instructions = old_skipped_instructions;
             }
-            Ok(accumulator)
         }
-        GD::Or(_) => todo!(),
-        GD::Not(gd) => {
-            let is_negative = context.is_negative;
-            context.is_negative = !is_negative;
-            let r = visit_gd(compiler, gd, args, context);
-            if let ContextPass::Second(pass) = &mut context.pass {
-                pass.instructions.push(Instruction::Not);
+        Ok(())
+    }
+
+    fn visit_precondition(
+        &self,
+        precondition: &'ast PreconditionExpr<'src>,
+        args: Option<&[PredicateUsize]>,
+        context: &mut Context,
+    ) -> Result<bool, Error> {
+        match precondition {
+            PreconditionExpr::And(vec) => {
+                let mut accumulator = true;
+                let mut old_skipped_instructions = 0;
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    old_skipped_instructions = pass.skipped_instructions;
+                    pass.skipped_instructions = 0;
+                }
+                for precondition in vec {
+                    accumulator &= self.visit_precondition(precondition, args, context)?
+                }
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    if accumulator {
+                        let len = vec.len() as StateUsize - pass.skipped_instructions;
+                        if len > 1 {
+                            pass.instructions.push(Instruction::And(len))
+                        }
+                    }
+                    pass.skipped_instructions = old_skipped_instructions;
+                }
+                Ok(accumulator)
             }
-            context.is_negative = is_negative;
-            r
+
+            PreconditionExpr::Forall(_) => todo!(),
+            PreconditionExpr::Preference(_) => todo!(),
+            PreconditionExpr::GD(gd) => self.visit_gd(gd, args, context),
         }
-        GD::Imply(_) => todo!(),
-        GD::Exists(_) => todo!(),
-        GD::Forall(_) => todo!(),
-        GD::LessThan(_, _) => todo!(),
-        GD::LessThanOrEqual(_, _) => todo!(),
-        GD::Equal(_, _) => todo!(),
-        GD::GreatherThanOrEqual(_, _) => todo!(),
-        GD::GreaterThan(_, _) => todo!(),
+    }
+
+    fn visit_gd(
+        &self,
+        gd: &'ast GD<'src>,
+        args: Option<&[PredicateUsize]>,
+        context: &mut Context,
+    ) -> Result<bool, Error> {
+        match gd {
+            GD::AtomicFormula(formula) => self.visit_term_formula(formula, args, context),
+            GD::And(vec) => {
+                let mut accumulator = true;
+                let mut old_skipped_instructions = 0;
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    old_skipped_instructions = pass.skipped_instructions;
+                    pass.skipped_instructions = 0;
+                }
+                for gd in vec {
+                    accumulator &= self.visit_gd(gd, args, context)?;
+                }
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    if accumulator {
+                        let len = vec.len() as StateUsize - pass.skipped_instructions;
+                        if len > 1 {
+                            pass.instructions.push(Instruction::And(len))
+                        }
+                    }
+                    pass.skipped_instructions = old_skipped_instructions;
+                }
+                Ok(accumulator)
+            }
+            GD::Or(_) => todo!(),
+            GD::Not(gd) => {
+                let is_negative = context.is_negative;
+                context.is_negative = !is_negative;
+                let r = self.visit_gd(gd, args, context);
+                if let ContextPass::Second(pass) = &mut context.pass {
+                    pass.instructions.push(Instruction::Not);
+                }
+                context.is_negative = is_negative;
+                r
+            }
+            GD::Imply(_) => todo!(),
+            GD::Exists(_) => todo!(),
+            GD::Forall(_) => todo!(),
+            GD::LessThan(_, _) => todo!(),
+            GD::LessThanOrEqual(_, _) => todo!(),
+            GD::Equal(_, _) => todo!(),
+            GD::GreatherThanOrEqual(_, _) => todo!(),
+            GD::GreaterThan(_, _) => todo!(),
+        }
     }
 }
 
@@ -461,8 +535,7 @@ mod tests {
             "sample_problems/simple_problem.pddl",
         );
         let (domain, problem) = sources.parse();
-        let maps = map_objects(&domain, &problem).unwrap();
-        let mut compiler = Compiler::new(&domain, &problem, maps);
+        let mut compiler = Compiler::new(&domain, &problem,  sources.domain_path.clone(), sources.problem_path.clone());
         let c_problem = match compiler.compile() {
             Ok(problem) => problem,
             Err(vec) => {

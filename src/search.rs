@@ -1,28 +1,124 @@
+
 use std::{
     collections::{BinaryHeap, HashMap},
     fmt::Debug,
-    hash::Hash,
+    hash::Hash, fs::File, io::Write, time::SystemTime, default,
 };
+
+use rustworkx_core::petgraph::{Graph, visit::GetAdjacencyMatrix, dot::Config};
 
 use crate::{
     compiler::{
-        action_graph::ActionGraph, CompiledAction, CompiledActionUsize, CompiledProblem, Domain,
-        Instruction, IntValue, Problem, Runnable, StateUsize,
+        action_graph::{ActionGraph, self}, CompiledAction, CompiledActionUsize, CompiledProblem,
+        // inertia::DomainInertia,
+        Instruction, IntValue, Runnable, StateUsize,
     },
-    Objects,
 };
+
+pub trait AStarNode<S> {
+    type PathType: Copy+Debug;
+    type CostType: Into<i64> + PartialOrd + Copy;
+
+    fn node_state(&self) -> &S;
+    fn state_size(&self) -> usize;
+    fn path_id(&self) -> Option<Self::PathType>;
+    fn estimate(&self) -> Self::CostType;
+    fn cost(&self) -> Self::CostType;
+}
+pub trait ASTarProblem<N, S, A> where N:AStarNode<S> {
+    fn first_node(&self) -> N;
+    fn action_neighbors(&self, from:Option<N::PathType>) -> std::slice::Iter<'_, N::PathType>;
+    fn new_node_if_possible(&self, action_idx:N::PathType, from:&N, args:&mut A) -> Option<N>;
+    fn is_meets_goal(&self, node:&N, args:&mut A) -> bool;
+}
 
 #[derive(Clone)]
 pub struct SolutionNode {
-    action_id: Option<CompiledActionUsize>,
+    pub action_id: Option<CompiledActionUsize>,
     state: Vec<bool>,
     functions: [IntValue; 1],
     cost: IntValue,
     estimate: IntValue,
-    visited_neighbor_idx: CompiledActionUsize,
 }
 
+impl AStarNode<Vec<bool>> for SolutionNode {
+    type PathType = CompiledActionUsize;
+
+    type CostType = i64;
+
+    fn node_state(&self) -> &Vec<bool> {
+        &self.state
+    }
+
+    fn state_size(&self) -> usize {
+        std::mem::size_of::<bool>()*self.state.len()+std::mem::size_of::<SolutionNode>()
+    }
+
+    fn path_id(&self) -> Option<Self::PathType> {
+        self.action_id
+    }
+
+    fn estimate(&self) -> Self::CostType {
+        self.estimate
+    }
+
+    fn cost(&self) -> Self::CostType {
+        self.cost
+    }
+}
+
+impl<'ast, 'src> ASTarProblem<SolutionNode, Vec<bool>, ExecStacks> for CompiledProblem<'ast, 'src> {
+    // fn action_count(&self) -> usize {
+    //     self.actions.len()
+    // }
+
+    fn new_node_if_possible(&self, action_idx:CompiledActionUsize, from:&SolutionNode, args:&mut ExecStacks) -> Option<SolutionNode> {
+        let action = &self.actions[action_idx as usize];
+        if action.precondition.run(&from.state, &from.functions, &mut args.state, &mut args.function) {
+            let mut new_node = SolutionNode {
+                action_id: Some(action_idx as CompiledActionUsize),
+                cost: from.cost,
+                estimate: from.estimate,
+                state: from.state.clone(),
+                functions: from.functions.clone(),
+            };
+            new_node.functions[0] = new_node.cost;
+            action
+                .effect
+                .run_mut(&mut new_node.state, &mut new_node.functions, &mut args.state, &mut args.function);
+            new_node.cost = new_node.functions[0];
+            Some(new_node)
+        } else {
+            None
+        }
+    }
+
+    fn is_meets_goal(&self, node:&SolutionNode, stack: &mut ExecStacks) -> bool {
+        self.goal.run(&node.state, &node.functions, &mut stack.state, &mut stack.function)
+    }
+
+    fn first_node(&self) -> SolutionNode {
+            let mut start = SolutionNode::new(self.memory_size);
+            let mut stacks = ExecStacks::default();
+            self.init.run_mut(&mut start.state, &mut start.functions, &mut stacks.state, &mut stacks.function);
+            start.estimate = self.goal.state_miss_count(&start.state, &mut stacks.state);
+            start
+    }
+
+    fn action_neighbors(&self, from:Option<CompiledActionUsize>) -> std::slice::Iter<'_, CompiledActionUsize> {
+        self.action_graph.get_priority(from)
+    }
+}
+
+#[derive(Default)]
+struct ExecStacks {
+    state: Vec<bool>,
+    function: Vec<IntValue>
+}
+
+
 impl Ord for SolutionNode {
+    // #[inline]
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let estimate_order = other.estimate.cmp(&self.estimate);
         if estimate_order.is_eq() {
@@ -32,7 +128,7 @@ impl Ord for SolutionNode {
             // Maybe try depth first?
             let cost_order = other.cost.cmp(&self.cost);
             if cost_order.is_eq() {
-                other.action_id.cmp(&self.action_id)
+                    other.action_id.cmp(&self.action_id)
             } else {
                 cost_order
             }
@@ -42,6 +138,7 @@ impl Ord for SolutionNode {
     }
 }
 
+
 impl PartialOrd for SolutionNode {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -49,6 +146,7 @@ impl PartialOrd for SolutionNode {
 }
 
 impl Hash for SolutionNode {
+    // #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         //Only came_from is using SolutionNode as a key.
         // Hash by state and last performed action.
@@ -59,6 +157,7 @@ impl Hash for SolutionNode {
 }
 
 impl PartialEq for SolutionNode {
+    // #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.action_id == other.action_id
             && self.state == other.state
@@ -86,210 +185,185 @@ impl SolutionNode {
             estimate: i64::MAX,
             state: vec![false; size as usize],
             functions: [0],
-            visited_neighbor_idx: 0,
+            // visited_priority: Priority::None,
+            // has_spawned_states: false,
+            // spawned_children: Vec::new()
         }
     }
 }
 
-pub struct AstarInternals<'src> {
-    open_set: BinaryHeap<SolutionNode>,
-    came_from: HashMap<SolutionNode, SolutionNode>,
-    cheapest_path_to_map: HashMap<Vec<bool>, i64>,
-    dynamic_action_graph: ActionGraph<'src>,
+struct Statistics {
+    iterations:usize,
+    explored_states: usize,
+    action_graph_links: usize,
+    largest_cost:i64,
+    smallest_cost:i64,
+    start_time: SystemTime,
+    last_statistics_print_time: SystemTime,
+    longest_path: Vec<CompiledActionUsize>,
+    detected_inverses:usize,
+    detected_alternative_branches:usize,
 }
-impl<'src> AstarInternals<'src> {
-    pub fn new(action_graph: &ActionGraph<'src>) -> Self {
+
+impl Statistics {
+    pub fn new() -> Self {
+        Self {  
+            iterations: 0,
+            largest_cost: 0,
+            smallest_cost: i64::MAX,
+            explored_states: 0,
+            action_graph_links: 0,
+            start_time: SystemTime::now(),
+            last_statistics_print_time: SystemTime::now(),
+            longest_path: Vec::new(),
+            detected_inverses: 0,
+            detected_alternative_branches: 0,
+        }
+    }
+}
+
+
+
+pub struct AstarInternals<S, N> where N: AStarNode<S>{
+    open_set: BinaryHeap<N>,
+    came_from: HashMap<N, N>,
+    cheapest_path_to_map: HashMap<S, N::CostType>,
+    path_buf: Vec<N::PathType>,
+    multipaths: Vec<Vec<N::PathType>>,
+    stats: Statistics,
+    log_file: File,
+}
+impl<S, N> AstarInternals<S, N> where N: AStarNode<S> + Ord + Hash{
+    pub fn new() -> Self {
         Self {
             open_set: BinaryHeap::new(),
             came_from: HashMap::new(),
             cheapest_path_to_map: HashMap::new(),
-            dynamic_action_graph: action_graph.clone(),
+            stats: Statistics::new(),
+            path_buf: Vec::with_capacity(128),
+            multipaths: Vec::new(),
+            log_file: File::create("solver.log").unwrap(),
         }
+    }
+
+    pub fn all_discovered_paths(&self) -> &[Vec<N::PathType>] {
+        self.multipaths.as_slice()
+    }
+
+    pub fn print_statistics(&self) {
+        let end = SystemTime::now();
+        let duration = end.duration_since(self.stats.start_time).unwrap().as_secs_f32();
+        println!("***** STATISTICS ******");
+        println!("Duration: {}s.", duration);
+        println!("Total iterations: {}", self.stats.iterations);
+        println!("Total states: {}", self.stats.explored_states);
+        println!("TotaL links: {}", self.stats.action_graph_links);
+        println!("Iterations per second: {}", self.stats.iterations as f32 / duration);
+        println!("States per second: {}", self.stats.explored_states as f32 / duration);
+        println!("Largest cost: {}", self.stats.largest_cost);
+        println!("Smallest cost: {}", self.stats.smallest_cost);
+        println!("Detected:");
+        println!("\tInverses: {}", self.stats.detected_inverses);
+        println!("\tAlternative paths: {}", self.stats.detected_alternative_branches);
+        let state_size = if let Some(n) = self.open_set.peek() {
+            n.state_size()
+        } else {
+            0
+        };
+        println!("open_set contains: {} states ({} MB).", self.open_set.len(), (self.open_set.len()*(std::mem::size_of::<N>()+state_size)) as f64 /1e6)
+    }
+    pub fn build_path<'a>(&'a mut self, mut node: &'a N) -> &[N::PathType] {
+        if let Some(id) = node.path_id() {
+            self.path_buf.push(id);
+        }
+        while let Some(next) = self.came_from.get(node) {
+            if let Some(id) = next.path_id() {
+                self.path_buf.push(id);
+            } else {
+                break;
+            }
+            node = next;
+        }
+        self.path_buf.reverse();
+        self.path_buf.as_slice()
     }
 }
 
-pub fn a_star(
-    problem: &CompiledProblem,
-    domain: Option<&Domain>,
-    past: Option<&Problem>,
-    args: &mut AstarInternals,
-) -> Option<Vec<CompiledActionUsize>> {
-    fn _test_action(
-        action_idx: CompiledActionUsize,
-        action: &CompiledAction,
-        current: &SolutionNode,
-        goal: &[Instruction],
-        args: &mut AstarInternals,
-    ) -> Option<SolutionNode> {
-        // print!("Checking: {}", action.precondition.disasm());
-        if action.precondition.run(&current.state, &current.functions) {
-            // println!("Can run!");
-            let mut new_node = SolutionNode {
-                action_id: Some(action_idx),
-                cost: current.cost,
-                estimate: current.estimate,
-                state: current.state.clone(),
-                functions: current.functions.clone(),
-                visited_neighbor_idx: 0,
-            };
-            new_node.functions[0] = new_node.cost;
-            action
-                .effect
-                .run_mut(&mut new_node.state, &mut new_node.functions);
-            new_node.cost = new_node.functions[0];
-            let wrong_states = goal.state_miss_count(&new_node.state);
-            new_node.estimate = new_node.cost + wrong_states;
-            if goal.len() > 5 {
-                // TODO Generalize problem subdivision
-                if let Instruction::ReadState(n) = goal[5] {
-                    // println!("Goal: {}", goal.disasm());
-                    if new_node.state[n as usize] && wrong_states != 0 {
-                        new_node.estimate += wrong_states;
-                    }
-                }
-            }
-            if new_node.estimate
-                < *args
-                    .cheapest_path_to_map
-                    .get(&new_node.state)
-                    .unwrap_or(&i64::MAX)
-            {
-                Some(new_node)
-            } else {
-                // We reached a state we already saw before
-                let mut path = Vec::new();
-                let mut current = new_node;
-                path.push(current.action_id.unwrap());
-                while let Some(next) = args.came_from.get(&current) {
-                    next.action_id.and_then(|p| Some(path.push(p)));
-                    current = next.clone();
-                }
-                if path.len() >= 2 {
-                    path.reverse();
-                    println!("Decreasing path priority.");
-                    args.dynamic_action_graph.add_low_priority_path(path);
-                }
-                None
-            }
-        } else {
-            // println!("Cannot run.");
-            None
-        }
-    }
-    let mut iterations = 0;
-    let mut smallest_missed_problem_states = IntValue::MAX;
-    if args.open_set.is_empty() {
-        let mut start = SolutionNode::new(problem.memory_size);
-        // println!("Init: {}", problem.init.disasm());
-        problem.init.run_mut(&mut start.state, &mut start.functions);
-        start.estimate = problem.goal.state_miss_count(&start.state);
-        smallest_missed_problem_states = start.estimate;
-        args.cheapest_path_to_map
-            .insert(start.state.clone(), start.estimate);
-        args.open_set.push(start.clone());
-    }
-    let mut largest_cost = 0;
+/// Generic problem solving A*.
+/// P - Problem type
+/// N - Node type
+/// S - State type
+/// A - Additional data that may be needed by ASTarProblem. Generally it's just an optimization to not create and destroy a ton of tiny Vec's
+pub fn a_star<'p, P, N, S, A>(problem:&'p P, is_search_all:bool, args: &mut AstarInternals<S, N>) -> Vec<N::PathType> 
+where 
+    A: Default,
+    P: ASTarProblem<N, S, A>,
+    N: AStarNode<S> + Ord + PartialOrd + Hash + Clone,
+    S: PartialEq + Eq + Hash + Clone
+{
+    println!("Starting A*");
+    let start = problem.first_node();
+    args.cheapest_path_to_map
+    .insert(start.node_state().clone(), start.estimate());
+    args.open_set.push(start);
+    let mut stacks = Default::default();
+
+
     while let Some(mut current) = args.open_set.pop() {
-        if problem.goal.run(&current.state, &current.functions) {
-            println!("Solved in {} iterations", iterations);
-            let mut path = Vec::new();
-            path.push(current.action_id.unwrap());
-            while let Some(next) = args.came_from.get(&current) {
-                next.action_id.and_then(|p| Some(path.push(p)));
-                current = next.clone();
-            }
-            path.reverse();
-            return Some(path);
-        }
-        if current.estimate - current.cost < smallest_missed_problem_states {
-            println!(
-                "Achieved required goal state in {} iterations. Node cost:{} estimate: {}",
-                iterations, current.cost, current.estimate
-            );
-            let mut path = vec![current.action_id.unwrap()];
-            let mut tmp = current.clone();
-            while let Some(next) = args.came_from.get(&tmp) {
-                let action_id = tmp.action_id.unwrap();
-                path.push(action_id);
-                let action_id = action_id as usize;
-                let domain_action_id = problem.actions[action_id].domain_action_idx as usize;
-                let args = problem.actions[action_id]
-                    .args
-                    .iter()
-                    .map(|(row, col)| past.unwrap().objects.get_object_name(*row, *col).1)
-                    .collect::<Vec<_>>();
-                print!(
-                    "{}({}), ",
-                    domain.unwrap().actions[domain_action_id].name(),
-                    args.join(",")
-                );
-                tmp = next.clone();
-            }
-            path.reverse();
-            println!("\nFlushing states.");
-            args.open_set.clear();
-            args.dynamic_action_graph.add_high_priority_path(
-                problem,
-                past.unwrap(),
-                domain.unwrap(),
-                path,
-            );
-            println!("Increasing path priority.");
-            smallest_missed_problem_states = current.estimate - current.cost;
-        }
-
-        let max_iterations = if let Some(last) = current.action_id {
-            args.dynamic_action_graph.priority[last as usize].len()
-        } else {
-            problem.actions.len()
-        } as CompiledActionUsize;
-
-        let mut upper_bound = current.visited_neighbor_idx
-            + (if current.action_id.is_some() {
-                3
+        if problem.is_meets_goal(&current, &mut stacks) {
+            // println!("Found solution");
+            if is_search_all {
+                let path = args.build_path(&current).to_owned();
+                args.multipaths.push(path);
+                args.path_buf.clear();
+                continue;
             } else {
-                max_iterations
-            });
-        if upper_bound > max_iterations {
-            upper_bound = max_iterations;
+                return args.build_path(&current).to_owned()
+            }
         }
 
-        for neighbor_idx in current.visited_neighbor_idx..upper_bound {
-            iterations += 1;
-            let i = if current.action_id.is_some() {
-                args.dynamic_action_graph.priority[current.action_id.unwrap() as usize]
-                    [neighbor_idx as usize]
-            } else {
-                neighbor_idx as CompiledActionUsize
-            };
-            let action = &problem.actions[i as usize];
-            if let Some(new_node) = _test_action(i, action, &current, &problem.goal, args) {
-                if new_node.cost > largest_cost {
-                    largest_cost = new_node.cost;
-                    println!(
-                        "Reached new depth of cost {}, open_set has {} states",
-                        largest_cost,
-                        args.open_set.len()
-                    );
+        let now = SystemTime::now();
+        args.stats.smallest_cost = current.cost().into();
+        if now.duration_since(args.stats.last_statistics_print_time).unwrap().as_secs() > 10 {
+            args.stats.last_statistics_print_time = now;
+            args.print_statistics();
+        }
+
+        for try_action_idx in problem.action_neighbors(current.path_id()) {
+            args.stats.iterations += 1;
+            if let Some(new_node) = problem.new_node_if_possible(*try_action_idx, &current, &mut stacks) {
+                args.stats.explored_states += 1;
+                if args.cheapest_path_to_map.contains_key(new_node.node_state()) {
+                    // println!("Adding {:?} after {:?} to open set because it gets us to a cheaper cost", new_node.path_id(), current.path_id());
+                    // print!("SEARCH: I have already seen this state. ");
+                    let cost_to_state = args.cheapest_path_to_map.get_mut(new_node.node_state()).unwrap();
+                    if *cost_to_state > new_node.cost() {
+                        // println!("This path is cheaper.");
+                        *cost_to_state = new_node.cost();
+                        args.came_from.insert(new_node.clone(), current.clone());
+                        args.open_set.push(new_node);
+                        if (*cost_to_state).into() > args.stats.largest_cost {
+                            args.stats.largest_cost = (*cost_to_state).into();
+                        }
+                    } else {
+                        // println!("This path is useless.");
+                    }
+                } else {
+                    // println!("Adding {:?} after {:?} to open set because it gets us to a new state", new_node.path_id(), current.path_id());
+                    if new_node.cost().into() > args.stats.largest_cost {
+                        args.stats.largest_cost = new_node.cost().into();
+                    }
+                    args.came_from.insert(new_node.clone(), current.clone());
+                    args.cheapest_path_to_map
+                        .insert(new_node.node_state().clone(), new_node.cost());
+                    args.open_set.push(new_node);
+
                 }
-                args.came_from.insert(new_node.clone(), current.clone());
-                args.cheapest_path_to_map
-                    .insert(new_node.state.clone(), new_node.cost);
-                args.open_set.push(new_node);
             }
-        }
-        current.visited_neighbor_idx = upper_bound;
-        if upper_bound != max_iterations {
-            args.open_set.push(current)
-        } else {
-            // println!(
-            //     "Finished exploring all neighbors of {:?}",
-            //     current.action_id
-            // );
         }
     }
-    println!("Leaving A* after {} iterations", iterations);
-    None
+    println!("A* explored the whole graph.");
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -299,8 +373,8 @@ mod test {
 
     use crate::{
         compiler::{
-            action_graph::ActionGraph, compile_problem, Action, CompiledAction,
-            CompiledActionUsize, CompiledProblem, Instruction, Objects, Runnable,
+            action_graph::ActionGraph, compile_problem, CompiledAction,
+            CompiledActionUsize, CompiledProblem, Instruction, Runnable,
         },
         lib_tests::load_repo_pddl,
         parser::{parse_domain, parse_problem},
@@ -308,43 +382,13 @@ mod test {
         ReportPrinter,
     };
 
-    #[test]
-    fn basic_search() {
-        use Instruction::*;
-        let p = CompiledProblem {
-            memory_size: 1,
-            constants_size: 0,
-            domain_action_ranges: Vec::new(),
-            actions: vec![
-                CompiledAction {
-                    domain_action_idx: 0,
-                    args: vec![(0, 0), (0, 0)],
-                    precondition: vec![ReadState(0), Not],
-                    effect: vec![And(0), SetState(0)],
-                },
-                CompiledAction {
-                    domain_action_idx: 1,
-                    args: vec![(0, 0), (0, 0)],
-                    precondition: vec![ReadState(0)],
-                    effect: vec![And(0), Not, SetState(0)],
-                },
-            ],
-            init: vec![And(0), Not, SetState(0)],
-            goal: vec![ReadState(0)],
-            action_graph: ActionGraph {
-                priority: vec![vec![], vec![]],
-                variable_inertia: Vec::new(),
-            },
-        };
-        let mut args = AstarInternals::new(&p.action_graph);
-        assert_eq!(a_star(&p, None, None, &mut args), Some(vec![0]))
-    }
+
 
     #[test]
     // #[ignore = "Takes too long without optimizations; Reached cost 42 before running out of ram"]
-    #[ignore = "Takes too long without optimizations; Reached cost 61 in 10 Minutes and found first drink!"]
+    // #[ignore = "Takes too long without optimizations; Reached cost 61 in 10 Minutes and found first drink!"]
     fn barman_pddl_search() -> std::io::Result<()> {
-        // was able to figure out how to make one cocktail in ~2 minutes
+        // was able to figure out how to make one cocktail in ~2 minutes 0, 2, 6, 5, 2, 7, 1, 0, 10, 11
         // grasp(left,shot5)
         // fill-shot(shot5,ingredient7,left,right,dispenser7),
         // pour-shot-to-clean-shaker(shot5,ingredient7,shaker1,left,l0,l1),
@@ -355,6 +399,31 @@ mod test {
         // grasp(left,shaker1),
         // shake(cocktail3,ingredient7,ingredient5,shaker1,left,right),
         // pour-shaker-to-shot(cocktail3,shot1,left,shaker1,l2,l1),
+        // without action graph:
+        //         ***** STATISTICS ******
+        // Duration: 268.95462s.
+        // Total iteartions: 6327770378
+        // Total states: 3478371
+        // Iterations per second: 23527280
+        // States per second: 12932.929
+        // Largest cost: 37
+        // Smallest cost: 27
+        // Detected:
+        //         Inverses: 4660173
+        //         Alternative paths: 8563632
+        // with action graph:
+        //         ***** STATISTICS ******
+        // Duration: 30.415234s.
+        // Total iterations: 263518275
+        // Total states: 1474622
+        // Iterations per second: 8664023
+        // States per second: 48483.008
+        // Largest cost: 37
+        // Smallest cost: 27
+        // Detected:
+        //         Inverses: 0
+        //         Alternative paths: 622116
+        // open_set contains: 1052951 states (366.426948 MB).
         let solution = full_search(
             "sample_problems/barman/domain.pddl",
             "sample_problems/barman/problem_5_10_7.pddl",
@@ -379,14 +448,13 @@ mod test {
     ) -> std::io::Result<Vec<CompiledActionUsize>> {
         let start = SystemTime::now();
         let sources = load_repo_pddl(domain_filename, problem_filename);
-        let domain = parse_domain(&sources.domain_src).unwrap_or_print_report(&sources);
-        let problem = parse_problem(&sources.problem_src, domain.requirements)
-            .unwrap_or_print_report(&sources);
-        let c_problem = compile_problem(&domain, &problem).unwrap_or_print_report(&sources);
+        let (domain, problem) = sources.parse();
+        let c_problem = sources.compile(&domain, &problem);
         println!(
-            "Compiled problem needs {} bits of memory and uses {} actions.",
+            "Compiled problem needs {} bits of memory and uses {} actions with {} links",
             c_problem.memory_size,
-            c_problem.actions.len()
+            c_problem.actions.len(),
+            c_problem.action_graph.total_links()
         );
 
         let mut precondition_instructions = 0;
@@ -405,7 +473,7 @@ mod test {
                     action
                         .args
                         .iter()
-                        .map(|(row, col)| problem.objects.get_object_name(*row, *col).1)
+                        .map(|object_idx| c_problem.maps.id_object_map[*object_idx as usize].1)
                         .collect::<Vec<&str>>()
                         .join(","),
                     action.precondition.disasm(),
@@ -418,29 +486,19 @@ mod test {
             precondition_instructions
         );
         println!("Total effect instructions: {}", effect_instructions);
-        if c_problem.actions.len() < 100 {
-            println!("Action graph:\n{}", c_problem.action_graph);
-        }
-        let mut args = AstarInternals::new(&c_problem.action_graph);
-        let solution = a_star(&c_problem, Some(&domain), Some(&problem), &mut args).unwrap();
+        // if c_problem.actions.len() < 100 {
+        //     println!("Action graph:\n{}", c_problem.action_graph);
+        // }
+        let mut args = AstarInternals::new();
+        let solution = a_star(&c_problem, false, &mut args);
+        println!("A* complete.");
+        args.print_statistics();
         let end = SystemTime::now();
         let duration = end.duration_since(start).unwrap();
         println!("Time taken: {}", duration.as_secs_f32());
         println!("Solution is {} actions long.", solution.len());
-        for action_id in &solution {
-            let action = c_problem.actions.get(*action_id as usize).unwrap();
-            println!(
-                "\t{}{:?}",
-                match &domain.actions[action.domain_action_idx as usize] {
-                    Action::Basic(ba) => ba.name.1,
-                    _ => "",
-                },
-                action
-                    .args
-                    .iter()
-                    .map(|(row, col)| problem.objects.get_object_name(*row, *col).1)
-                    .collect::<Vec<&str>>()
-            );
+        for action_idx in &solution {
+            println!("\t{}", c_problem.get_action_string(*action_idx));
         }
         Ok(solution)
     }

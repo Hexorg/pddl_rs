@@ -1,95 +1,83 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf, ops::Range};
 
 use crate::{
     compiler::{
-        action_graph::ActionGraph, inertia::Inertia, AtomicFormula, BasicAction, CompiledAction,
-        CompiledProblem, FunctionTerm, Instruction, Name, PredicateUsize, StateUsize, Term,
+        action_graph::ActionGraph, AtomicFormula, BasicAction, CompiledAction,
+        CompiledProblem, Instruction, Name, PredicateUsize, StateUsize, CompiledActionUsize, ASTActionUsize, atomic_formula_map::AtomicFormulaMap,
     },
-    Error,
+    Error, parser::ast::{r#type::Type, term::{Term, FunctionTerm}},
 };
 
 use super::{
-    visit_all_actions, visit_effect, visit_init, visit_precondition, AstKind, Compiler, Context,
-    ContextPass,
+    AstKind, Compiler, Context,
+    ContextPass, super::domain::CompiledAtomicFormula,
 };
 
-pub struct SecondPassContext<'src> {
-    pub predicate_memory_map: HashMap<AtomicFormula<'src, Name<'src>>, StateUsize>,
-    pub memory_map: Vec<AtomicFormula<'src, Name<'src>>>,
+pub struct SecondPassContext {
+    /// Maps AtomicFormula<Name> to offset in memory
+    pub predicate_memory_map: AtomicFormulaMap,
+
     pub skipped_instructions: PredicateUsize,
     pub instructions: Vec<Instruction>,
-    pub inertia: Vec<Inertia<'src, Name<'src>>>,
-    pub compiled_problem: CompiledProblem<'src>,
+    // pub problem_inertia: Inertia<'src, Name<'src>>,
+    pub actions: Vec<CompiledAction>,
+    pub domain_action_ranges: Vec<Range<CompiledActionUsize>>,
+    pub init: Vec<Instruction>,
+    pub goal: Vec<Instruction>,
 }
 
-impl<'src> SecondPassContext<'src> {
-    pub fn new(variable_inertia: Vec<Inertia<'src, Term<'src>>>) -> Self {
+impl SecondPassContext {
+    pub fn new() -> Self {
         Self {
             skipped_instructions: 0,
-            predicate_memory_map: HashMap::new(),
-            memory_map: Vec::new(),
+            predicate_memory_map: AtomicFormulaMap::new(),
             instructions: Vec::new(),
-            inertia: Vec::new(),
-            compiled_problem: CompiledProblem {
-                memory_size: 0,
-                constants_size: 0,
-                domain_action_ranges: Vec::new(),
-                actions: Vec::new(),
-                init: Vec::new(),
-                goal: Vec::new(),
-                action_graph: ActionGraph::new(variable_inertia),
-            },
+            // problem_inertia: Inertia::new(),
+            actions: Vec::new(),
+            domain_action_ranges: Vec::new(),
+            init: Vec::new(),
+            goal: Vec::new(),
         }
     }
 }
 
 pub fn second_pass<'src, 'ast>(
     compiler: &Compiler<'ast, 'src>,
-    context: &mut Context<'src>,
+    context: &mut Context,
 ) -> Result<(), Vec<Error>>
 where
     'ast: 'src,
 {
     let pass2_data = context.pass.unwrap_pass2_context();
     for predicate in &compiler.pass1_data.variable_predicates {
-        pass2_data.predicate_memory_map.insert(
-            predicate.clone(),
-            pass2_data.predicate_memory_map.len() as StateUsize,
-        );
-        pass2_data.memory_map.push(predicate.clone());
+        pass2_data.predicate_memory_map.allocate(predicate.clone());
     }
 
-    let actions = visit_all_actions(compiler, context)?;
+    let actions = compiler.visit_all_actions(context)?;
     context.ast_kind = AstKind::Init;
-    visit_init(compiler, &compiler.problem.init, context)?;
+    compiler.visit_init(&compiler.problem.init, context)?;
 
     let pass2_data = context.pass.unwrap_pass2_context();
     let init = std::mem::take(&mut pass2_data.instructions);
+    pass2_data.init = init;
     context.ast_kind = AstKind::Goal;
-    visit_precondition(compiler, &compiler.problem.goal, None, context)?;
+    compiler.visit_precondition(&compiler.problem.goal, None, context)?;
     let pass2_data = context.pass.unwrap_pass2_context();
     let goal = std::mem::take(&mut pass2_data.instructions);
-    let problem = &mut pass2_data.compiled_problem;
-    problem.memory_size = compiler.pass1_data.variable_predicates.len() as StateUsize;
-    problem.constants_size = (compiler.pass1_data.true_predicates.len()
-        + compiler.pass1_data.false_predicates.len()) as StateUsize;
-    problem.actions = actions;
-    problem.init = init;
-    problem.goal = goal;
-    problem.action_graph.apply_inertia(&pass2_data.inertia);
-    problem.action_graph.apply_dijkstra();
+    pass2_data.goal = goal;
+    pass2_data.actions = actions;
     Ok(())
 }
 
 pub fn visit_basic_action<'src, 'ast>(
     compiler: &Compiler<'src, 'ast>,
-    action: &BasicAction<'src>,
-    args: &[(Name<'src>, (u16, u16))],
-    context: &mut Context<'src>,
+    action: &'ast BasicAction<'src>,
+    args: &[PredicateUsize],
+    context: &mut Context,
 ) -> Result<Option<CompiledAction>, Error> {
     if let Some(precondition) = &action.precondition {
         context.ast_kind = AstKind::Precondition;
-        if !visit_precondition(compiler, precondition, Some(args), context)? {
+        if !compiler.visit_precondition(precondition, Some(args), context)? {
             context.pass.unwrap_pass2_context().instructions.clear();
             return Ok(None);
         }
@@ -97,24 +85,15 @@ pub fn visit_basic_action<'src, 'ast>(
     let precondition = std::mem::take(&mut context.pass.unwrap_pass2_context().instructions);
     if let Some(effect) = &action.effect {
         context.ast_kind = AstKind::Effect;
-        visit_effect(compiler, effect, args, context)?;
+        compiler.visit_effect(effect, args, context)?;
     }
     let pass = context.pass.unwrap_pass2_context();
     let effect = std::mem::take(&mut pass.instructions);
     // let mut args_map = HashMap::with_capacity(args.len());
-    let mut args_vec = Vec::new();
-    for arg in args {
-        // args_map.insert(arg.0, arg.1);
-        args_vec.push(arg.1);
-    }
-    // pass.args_map.push(args_map);
-    let inertia = pass.compiled_problem.action_graph.variable_inertia
-        [context.domain_action_idx as usize]
-        .concrete(compiler.problem, args);
-    pass.inertia.push(inertia);
+
     Ok(Some(CompiledAction {
         domain_action_idx: context.domain_action_idx,
-        args: args_vec,
+        args: args.to_owned(),
         precondition,
         effect,
     }))
@@ -122,23 +101,22 @@ pub fn visit_basic_action<'src, 'ast>(
 
 pub fn visit_term_formula<'src, 'ast>(
     compiler: &Compiler<'src, 'ast>,
-    _term_formula: &AtomicFormula<'src, Term<'src>>,
-    _args: Option<&[(Name<'src>, (u16, u16))]>,
-    context: &mut Context<'src>,
-    formula: AtomicFormula<'src, Name<'src>>,
+    term_formula: &'ast AtomicFormula<Term<'src>>,
+    _args: Option<&[PredicateUsize]>,
+    context: &mut Context,
+    formula: CompiledAtomicFormula,
 ) -> Result<bool, Error> {
-    let pass = match &mut context.pass {
-        ContextPass::Second(pass) => pass,
-        _ => panic!(),
-    };
+    let pass = context.pass.unwrap_pass2_context();
     if let Some(offset) = pass.predicate_memory_map.get(&formula) {
         match context.ast_kind {
-            AstKind::Precondition | AstKind::Goal => {
-                pass.instructions.push(Instruction::ReadState(*offset))
-            }
-            AstKind::Effect | AstKind::Init => {
-                pass.instructions.push(Instruction::SetState(*offset))
-            }
+            AstKind::Precondition =>  {
+                pass.instructions.push(Instruction::ReadState(offset));
+            },
+            AstKind::Goal => { pass.instructions.push(Instruction::ReadState(offset)) }
+            AstKind::Effect => {
+                pass.instructions.push(Instruction::SetState(offset));
+            },
+            AstKind::Init => { pass.instructions.push(Instruction::SetState(offset)); }
             _ => panic!(),
         }
         Ok(true)
@@ -164,7 +142,7 @@ pub fn visit_term_formula<'src, 'ast>(
 pub fn increate_function_term<'ast, 'src>(
     _compiler: &Compiler<'ast, 'src>,
     fterm: &FunctionTerm<'src>,
-    context: &mut Context<'src>,
+    context: &mut Context,
 ) -> Result<(), Error> {
     if fterm.name.1 == "total-cost" && fterm.terms.len() == 0 {
         if let ContextPass::Second(pass) = &mut context.pass {
@@ -195,23 +173,23 @@ mod tests {
         );
         // let sources = load_repo_pddl("sample_problems/simple_domain.pddl", "sample_problems/simple_problem.pddl");
         let (domain, problem) = sources.parse();
-        let maps = map_objects(&domain, &problem).unwrap();
-        let mut compiler = Compiler::new(&domain, &problem, maps);
+        let compiler = Compiler::new(&domain, &problem, sources.domain_path.clone(), sources.problem_path.clone());
         let c_problem = compiler.compile().unwrap_or_print_report(&sources);
-        println!("Memory size: {} bits", c_problem.memory_size);
+        println!("Action count: {}", c_problem.domain.actions.len());
+        println!("Actions permutated with objects count: {}", c_problem.actions.len());
+        println!("State space: {} bits", c_problem.memory_size);
         println!("Constants size: {} bits", c_problem.constants_size);
-        println!("Actions: {}", c_problem.actions.len());
-        for (_action_idx, action) in c_problem.actions.iter().enumerate() {
-            println!(
-                "  {}:",
-                domain.actions[action.domain_action_idx as usize].name()
-            );
-            println!(
-                "    if {} effect: {}",
-                action.precondition.decomp(&compiler.maps.memory_map),
-                action.effect.decomp(&compiler.maps.memory_map)
-            );
-        }
-        println!("Action graph:\n{:?}", c_problem.action_graph);
+        // println!("Actions: {}", c_problem.actions.len());
+        // for (_action_idx, action) in c_problem.actions.iter().enumerate() {
+        //     println!(
+        //         "  {}:",
+        //         domain.actions[action.domain_action_idx as usize].name()
+        //     );
+        //     println!(
+        //         "    if {} effect: {}",
+        //         action.precondition.decomp(&c_problem.maps.memory_map),
+        //         action.effect.decomp(&c_problem.maps.memory_map)
+        //     );
+        // }
     }
 }

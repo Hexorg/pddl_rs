@@ -1,38 +1,35 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
-    hash::Hash,
+    hash::Hash, path::PathBuf,
 };
 
 pub mod span;
-pub use span::*;
 pub mod name;
-pub use name::*;
+pub mod term;
+pub mod atomic_formula;
+pub mod list;
+pub mod r#type;
 
+pub use span::*;
+pub use name::*;
+use atomic_formula::*;
+use term::*;
+use r#type::*;
+use list::*;
 use enumset::{EnumSet, EnumSetType};
 
-use crate::{compiler::PredicateUsize, ErrorKind};
 
-pub trait Objects<'src> {
-    fn get_object_name(&self, row: PredicateUsize, col: PredicateUsize) -> Name<'src>;
-    fn get_object_type(&self, row: PredicateUsize) -> &Type<'src>;
-}
-impl<'src> Objects<'src> for Vec<List<'src>> {
-    fn get_object_name(&self, row: PredicateUsize, col: PredicateUsize) -> Name<'src> {
-        let name = self[row as usize].items[col as usize];
-        name
-    }
-    fn get_object_type(&self, row: PredicateUsize) -> &Type<'src> {
-        &self[row as usize].kind
-    }
-}
+
+// #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// pub struct TypedListIdx(pub PredicateUsize, pub PredicateUsize);
 
 #[derive(PartialEq, Debug)]
 pub struct Problem<'src> {
     pub name: Name<'src>,
     pub domain: Name<'src>,
     pub requirements: EnumSet<Requirement>,
-    pub objects: Vec<List<'src>>,
+    pub objects: TypedList<'src>,
     pub init: Vec<Init<'src>>,
     pub goal: PreconditionExpr<'src>,
     pub constraints: Option<PrefConstraintGD<'src>>,
@@ -40,22 +37,13 @@ pub struct Problem<'src> {
     // pub length: Option<LengthSpecification>, // deprecated since PDDL 2.1
 }
 
-impl<'src> Problem<'src> {
-    pub fn get_objects(&self) -> Vec<Name<'src>> {
-        let mut result = Vec::new();
-        for List { items, kind: _ } in &self.objects {
-            result.extend(items.iter().cloned())
-        }
-        result
-    }
-}
 
 #[derive(PartialEq, Debug)]
 pub struct Domain<'src> {
     pub name: Name<'src>,
     pub requirements: EnumSet<Requirement>,
-    pub types: Vec<List<'src>>,
-    pub constants: Vec<List<'src>>,
+    pub types: TypedList<'src>,
+    pub constants: TypedList<'src>,
     pub predicates: Vec<AtomicFSkeleton<'src>>,
     pub functions: Vec<FunctionTypedList<'src>>,
     pub constraints: Option<ConstraintGD<'src>>,
@@ -63,32 +51,46 @@ pub struct Domain<'src> {
 }
 
 impl<'src> Domain<'src> {
-    pub fn get_predicate_names(&self) -> Vec<Name<'src>> {
-        let mut result = Vec::new();
-        for AtomicFSkeleton { name, variables: _ } in &self.predicates {
-            result.push(name.clone());
+    // pub fn get_predicate_names(&self) -> Vec<Name<'src>> {
+    //     let mut result = Vec::new();
+    //     for AtomicFSkeleton { name, variables: _ } in &self.predicates {
+    //         result.push(name.clone());
+    //     }
+    //     result
+    // }
+    // pub fn get_type_parents(&self, kind: &str) -> Vec<Name<'src>> {
+    //     let mut result = Vec::new();
+    //     let mut current = kind;
+    //     let mut is_found = true;
+    //     while is_found {
+    //         is_found = false;
+    //         for List { items, kind } in &self.types {
+    //             if items.iter().find(|n| n.1 == current).is_some() {
+    //                 let kind = match kind {
+    //                     Type::Exact(kind) => kind,
+    //                     _ => todo!(),
+    //                 };
+    //                 result.push(*kind);
+    //                 is_found = true;
+    //                 current = kind.1
+    //             }
+    //         }
+    //     }
+    //     result
+    // }
+    pub fn get_action_string(&self, action_idx:usize) -> String {
+        match &self.actions[action_idx] {
+            Action::Basic(ba) => format!("{}({})", ba.name, ba.parameters.to_string()),
+            Action::Durative(_) => todo!(),
+            Action::Derived(_, _) => todo!(),
         }
-        result
     }
-    pub fn get_type_parents(&self, kind: &str) -> Vec<Name<'src>> {
-        let mut result = Vec::new();
-        let mut current = kind;
-        let mut is_found = true;
-        while is_found {
-            is_found = false;
-            for List { items, kind } in &self.types {
-                if items.iter().find(|n| n.1 == current).is_some() {
-                    let kind = match kind {
-                        Type::Exact(kind) => kind,
-                        _ => todo!(),
-                    };
-                    result.push(*kind);
-                    is_found = true;
-                    current = kind.1
-                }
-            }
+    pub fn get_action_name(&self, action_idx:usize) -> Name<'src> {
+        match &self.actions[action_idx] {
+            Action::Basic(ba) => ba.name,
+            Action::Durative(_) => todo!(),
+            Action::Derived(_, _) => todo!(),
         }
-        result
     }
 }
 
@@ -190,7 +192,7 @@ impl std::fmt::Display for Requirement {
 
 #[derive(PartialEq, Debug)]
 pub struct Forall<'src, T> {
-    pub variables: Vec<List<'src>>,
+    pub variables: TypedList<'src>,
     pub gd: Box<T>,
 }
 
@@ -367,7 +369,7 @@ impl<'src> Action<'src> {
         }
     }
 
-    // pub fn shared_parameters(&self, other:Action<'src>) -> Vec<List<'src>> {
+    // pub fn shared_parameters(&self, other:Action<'src>) -> TypedList<'src> {
     //     let mut shared = Vec::new();
     //     match self {
     //         Action::Basic(ba) => match other {
@@ -397,7 +399,7 @@ pub struct BasicAction<'src> {
     pub name: Name<'src>,
     /// Action parameters - similar to function parameters in programming
     /// They can be typed or not, depending on domain requirements.
-    pub parameters: Vec<List<'src>>,
+    pub parameters: TypedList<'src>,
     /// AST representation of basic preconditions.
     pub precondition: Option<PreconditionExpr<'src>>,
     /// AST representation of basic effects.
@@ -407,7 +409,7 @@ pub struct BasicAction<'src> {
 #[derive(PartialEq, Debug)]
 pub struct DurativeAction<'src> {
     pub name: Name<'src>,
-    pub parameters: Vec<List<'src>>,
+    pub parameters: TypedList<'src>,
     pub duration: DurationConstraint<'src>,
     pub condition: Option<DurationGD<'src>>,
     pub effect: Option<DurationEffect<'src>>,
@@ -429,65 +431,9 @@ pub struct DurativeAction<'src> {
 #[derive(PartialEq, Debug)]
 pub struct AtomicFSkeleton<'src> {
     pub name: Name<'src>,
-    pub variables: Vec<List<'src>>,
+    pub variables: TypedList<'src>,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
-pub enum Type<'src> {
-    None,
-    Either(Vec<Name<'src>>),
-    Exact(Name<'src>),
-}
-
-impl<'src> SpannedAst for Type<'src> {
-    fn span(&self) -> Span {
-        match self {
-            Type::None => Span {
-                start: 0,
-                end: 0,
-                is_problem: false,
-            },
-            Type::Either(vec) => vec.span(),
-            Type::Exact(name) => name.span(),
-        }
-    }
-}
-impl<'src> Display for Type<'src> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Type::None => f.write_str("[None]"),
-            Type::Either(vec) => f.write_fmt(format_args!(
-                "(either {})",
-                vec.iter().map(|n| n.1).collect::<Vec<_>>().join(", ")
-            )),
-            Type::Exact(name) => f.write_str(name.1),
-        }
-    }
-}
-impl<'src> Debug for Type<'src> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <Self as Display>::fmt(&self, f)
-    }
-}
-
-impl<'src> Type<'src> {
-    pub fn logical_compare(&self, other: Self) -> bool {
-        match self {
-            Type::None => match other {
-                Type::None => true,
-                _ => false,
-            },
-            Type::Either(left) => match other {
-                Type::Either(right) => left.iter().zip(right.iter()).all(|(l, r)| l.1 == r.1),
-                _ => false,
-            },
-            Type::Exact(left) => match other {
-                Type::Exact(right) => left.1 == right.1,
-                _ => false,
-            },
-        }
-    }
-}
 
 /// [`FunctionTypeKind::Numeric`] if `:numeric-fluents` is set.
 #[derive(PartialEq, Debug)]
@@ -501,308 +447,4 @@ pub enum FunctionType<'src> {
 pub struct FunctionTypedList<'src> {
     pub functions: Vec<AtomicFSkeleton<'src>>,
     pub kind: FunctionType<'src>,
-}
-
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub struct List<'src> {
-    pub items: Vec<Name<'src>>,
-    pub kind: Type<'src>,
-}
-
-#[derive(PartialEq, Hash, Eq, Clone)]
-pub enum AtomicFormula<'src, T> {
-    Predicate(Name<'src>, Vec<T>),
-    Equality(T, T),
-}
-impl<'src, T> Display for AtomicFormula<'src, T>
-where
-    T: Display,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AtomicFormula::Predicate(name, vec) => f.write_fmt(format_args!(
-                "{}({})",
-                name,
-                vec.iter()
-                    .map(|i| format!("{}", i))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-            AtomicFormula::Equality(left, right) => {
-                f.write_fmt(format_args!("{} = {}", left, right))
-            }
-        }
-    }
-}
-impl<'src, T> Debug for AtomicFormula<'src, T>
-where
-    T: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AtomicFormula::Predicate(name, vec) => f.write_fmt(format_args!(
-                "{}({})",
-                name,
-                vec.iter()
-                    .map(|i| format!("{:?}", i))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-            AtomicFormula::Equality(left, right) => {
-                f.write_fmt(format_args!("{:?} = {:?}", left, right))
-            }
-        }
-    }
-}
-impl<'src, T> AtomicFormula<'src, T> {
-    pub fn name(&self) -> Name<'src> {
-        match self {
-            AtomicFormula::Predicate(name, _) => *name,
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-    }
-}
-
-impl<'src> AtomicFormula<'src, Name<'src>> {
-    pub fn to_typed(
-        &self,
-        type_tree: &HashMap<&'src str, Name<'src>>,
-    ) -> HashSet<AtomicFormula<'src, Type<'src>>> {
-        let mut result = HashSet::new();
-        match self {
-            AtomicFormula::Predicate(predicate, objects) => {
-                let mut type_vec = objects.clone();
-                let mut more_iterations = true;
-                while more_iterations {
-                    more_iterations = false;
-                    let mut new_type_vec = Vec::new();
-                    if type_tree.len() > 0 {
-                        for obj in &type_vec {
-                            let type_name = *type_tree.get(obj.1).unwrap();
-                            if type_name.1 != "object" {
-                                more_iterations = true;
-                            }
-                            new_type_vec.push(type_name);
-                        }
-                        result.insert(AtomicFormula::Predicate(
-                            *predicate,
-                            new_type_vec.iter().map(|t| Type::Exact(*t)).collect(),
-                        ));
-                    } else {
-                        result.insert(AtomicFormula::Predicate(
-                            *predicate,
-                            (0..type_vec.len()).map(|_| Type::None).collect(),
-                        ));
-                    }
-                    type_vec = new_type_vec;
-                }
-            }
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-        result
-    }
-}
-impl<'src> Into<AtomicFormula<'src, Term<'src>>> for &AtomicFormula<'src, Name<'src>> {
-    fn into(self) -> AtomicFormula<'src, Term<'src>> {
-        match self {
-            AtomicFormula::Predicate(name, args) => {
-                let mut term_vec = Vec::new();
-                for arg in args {
-                    term_vec.push(Term::Name(*arg))
-                }
-                AtomicFormula::Predicate(*name, term_vec)
-            }
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-    }
-}
-impl<'src> TryInto<AtomicFormula<'src, Name<'src>>> for &AtomicFormula<'src, Term<'src>> {
-    type Error = super::Error;
-
-    fn try_into(self) -> Result<AtomicFormula<'src, Name<'src>>, Self::Error> {
-        match self {
-            AtomicFormula::Predicate(name, terms) => {
-                let mut name_vec = Vec::with_capacity(terms.len());
-                for term in terms {
-                    match term {
-                        Term::Name(name) => name_vec.push(*name),
-                        _ => {
-                            return Err(Self::Error {
-                                span: terms.span(),
-                                kind: ErrorKind::ExpectedName,
-                                chain: None,
-                            })
-                        }
-                    }
-                }
-                Ok(AtomicFormula::Predicate(*name, name_vec))
-            }
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-    }
-}
-
-impl<'src> AtomicFormula<'src, Term<'src>> {
-    pub fn concrete(
-        &self,
-        objects: &impl Objects<'src>,
-        args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
-    ) -> AtomicFormula<'src, Name<'src>> {
-        match self {
-            AtomicFormula::Predicate(predicate, variables) => {
-                let mut name_vec: Vec<Name<'src>> = Vec::with_capacity(variables.len());
-                for variable in variables {
-                    match variable {
-                        Term::Name(name) => name_vec.push(*name),
-                        Term::Variable(var) => {
-                            for (from, to) in args {
-                                if from == var {
-                                    name_vec.push(objects.get_object_name(to.0, to.1));
-                                    break;
-                                }
-                            }
-                        }
-                        Term::Function(_) => todo!(),
-                    }
-                }
-                AtomicFormula::Predicate(predicate.clone(), name_vec)
-            }
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-    }
-    pub fn concrete_from_map(
-        &self,
-        problem: &Problem<'src>,
-        map: &HashMap<Name<'src>, (PredicateUsize, PredicateUsize)>,
-    ) -> AtomicFormula<'src, Name<'src>> {
-        match self {
-            AtomicFormula::Predicate(predicate, variables) => {
-                let mut name_vec = Vec::with_capacity(variables.len());
-                for variable in variables {
-                    name_vec.push(match variable {
-                        Term::Name(name) => *name,
-                        Term::Variable(var) => {
-                            let (row, col) = map.get(var).unwrap();
-                            problem.objects.get_object_name(*row, *col)
-                        }
-                        Term::Function(_) => todo!(),
-                    });
-                }
-                AtomicFormula::Predicate(predicate.clone(), name_vec)
-            }
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-    }
-    pub fn fake_concrete(
-        &self,
-        args: &[(Name<'src>, (PredicateUsize, PredicateUsize))],
-    ) -> AtomicFormula<'src, (PredicateUsize, PredicateUsize)> {
-        match self {
-            AtomicFormula::Predicate(predicate, variables) => {
-                let mut fake_vec: Vec<(PredicateUsize, PredicateUsize)> =
-                    Vec::with_capacity(variables.len());
-                for variable in variables {
-                    match variable {
-                        Term::Variable(var) => {
-                            for (from, to) in args {
-                                if from == var {
-                                    fake_vec.push(*to);
-                                    break;
-                                }
-                            }
-                        }
-                        Term::Name(_) => panic!("Already concrete."),
-                        Term::Function(_) => todo!(),
-                    }
-                }
-                AtomicFormula::Predicate(predicate.clone(), fake_vec)
-            }
-            AtomicFormula::Equality(_, _) => todo!(),
-        }
-    }
-}
-
-#[derive(PartialEq, Debug)]
-pub enum NegativeFormula<'src, T>
-where
-    T: Display,
-{
-    Direct(AtomicFormula<'src, T>),
-    Not(AtomicFormula<'src, T>),
-}
-
-/// Function name with 0 or more arguments
-#[derive(PartialEq, Hash, Eq, Clone)]
-pub struct FunctionTerm<'src> {
-    pub name: Name<'src>,
-    pub terms: Vec<Term<'src>>,
-}
-impl<'src> Debug for FunctionTerm<'src> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}({:?})", self.name.1, self.terms))
-    }
-}
-impl<'src> SpannedAst for FunctionTerm<'src> {
-    fn span(&self) -> Span {
-        self.name.0.change_end(self.terms.span().end)
-    }
-}
-
-/// A name, variable, or function
-#[derive(Clone, Eq)]
-pub enum Term<'src> {
-    Name(Name<'src>),
-    Variable(Name<'src>),
-    Function(FunctionTerm<'src>), // :object-fluents
-}
-impl<'src> std::hash::Hash for Term<'src> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self {
-            Term::Name(n) => n.hash(state),
-            Term::Variable(_) => state.write_u8(1),
-            Term::Function(f) => f.hash(state),
-        }
-    }
-}
-impl<'src> PartialEq for Term<'src> {
-    fn eq(&self, other: &Self) -> bool {
-        match self {
-            Term::Name(l) => match other {
-                Term::Name(r) => l.eq(r),
-                _ => false,
-            },
-            Term::Variable(_) => match other {
-                Term::Variable(_) => true,
-                _ => false,
-            },
-            Term::Function(l) => match other {
-                Term::Function(r) => l.eq(r),
-                _ => false,
-            },
-        }
-    }
-}
-impl<'src> Debug for Term<'src> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Name(name) => f.write_str(name.1),
-            Self::Variable(name) => f.write_fmt(format_args!("?{}", name.1)),
-            Self::Function(arg0) => f.write_fmt(format_args!("{:?}", arg0)),
-        }
-    }
-}
-impl<'src> Display for Term<'src> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <Self as Debug>::fmt(&self, f)
-    }
-}
-
-impl<'src> SpannedAst for Term<'src> {
-    fn span(&self) -> Span {
-        match self {
-            Self::Name(n) => n.0,
-            Self::Variable(v) => v.0,
-            Self::Function(f) => f.span(),
-        }
-    }
 }
